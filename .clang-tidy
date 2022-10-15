@@ -1,0 +1,5 @@
+Checks: '-*,bugprone-*,misc-no-recursion'
+CheckOptions:
+  - key: bugprone-argument-comment.StrictMode
+    value: 1
+FormatStyle: 'file'
