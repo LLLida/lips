@@ -94,11 +94,6 @@ static Lips_Cell* Lips_HashTableInsertWithHash(Lips_AllocFunc alloc, Lips_Deallo
                                                const char* key, Lips_Cell value);
 static Lips_Cell* Lips_HashTableSearch(const Lips_HashTable* ht, const char* key);
 static Lips_Cell* Lips_HashTableSearchWithHash(const Lips_HashTable* ht, uint32_t hash, const char* key);
-static Lips_Cell* Lips_HashTableEnsure(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Lips_Stack* stack,
-                                       Lips_HashTable* ht, const char* key);
-static Lips_Cell* Lips_HashTableEnsureWithHash(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
-                                               Lips_Stack* stack, Lips_HashTable* ht,
-                                               uint32_t hash, const char* key);
 static void Lips_HashTableIterate(Lips_HashTable* ht, Lips_Iterator* it);
 static int Lips_IteratorIsEmpty(const Lips_Iterator* it);
 static void Lips_IteratorGet(const Lips_Iterator* it, const char** key, Lips_Cell* value);
@@ -968,20 +963,20 @@ Lips_CDR(Lips_Interpreter* interpreter, Lips_Cell cell)
   return LIPS_GET_TAIL(cell);
 }
 
-static void*
+void*
 Lips_DefaultAlloc(size_t bytes)
 {
   return malloc(bytes);
 }
 
-static void
+void
 Lips_DefaultDealloc(void* ptr, size_t bytes)
 {
   (void)bytes;
   free(ptr);
 }
 
-static void
+void
 Lips_DestroyCell(Lips_Cell cell, Lips_DeallocFunc dealloc) {
   switch (LIPS_GET_TYPE(cell)) {
   default: assert(0 && "internal error: destroy_cell: faced undefined type of cell");
@@ -1003,7 +998,7 @@ Lips_DestroyCell(Lips_Cell cell, Lips_DeallocFunc dealloc) {
   }
 }
 
-static Lips_StringData*
+Lips_StringData*
 Lips_StringCreate(Lips_AllocFunc alloc)
 {
   Lips_StringData* str;
@@ -1014,7 +1009,7 @@ Lips_StringCreate(Lips_AllocFunc alloc)
   return str;
 }
 
-static void
+void
 Lips_StringAllocate(Lips_StringData* str, Lips_AllocFunc alloc, const char* ptr, uint32_t n)
 {
   str->length = n;
@@ -1025,7 +1020,7 @@ Lips_StringAllocate(Lips_StringData* str, Lips_AllocFunc alloc, const char* ptr,
   str->hash = Lips_ComputeHash(str->ptr);
 }
 
-static void
+void
 Lips_StringDestroy(Lips_StringData* str, Lips_DeallocFunc dealloc)
 {
   if (str->counter == 1) {
@@ -1037,7 +1032,7 @@ Lips_StringDestroy(Lips_StringData* str, Lips_DeallocFunc dealloc)
   }
 }
 
-static void
+void
 Lips_StringSet(Lips_AllocFunc alloc, Lips_StringData* str, uint32_t index, char c)
 {
   if (str->counter > 1) {
@@ -1050,7 +1045,7 @@ Lips_StringSet(Lips_AllocFunc alloc, Lips_StringData* str, uint32_t index, char 
   str->ptr[index] = c;
 }
 
-static Lips_StringData*
+Lips_StringData*
 Lips_StringCopy(Lips_StringData* src)
 {
   // copies are very cheap, because we don't actually do copies
@@ -1058,7 +1053,7 @@ Lips_StringCopy(Lips_StringData* src)
   return src;
 }
 
-static void
+void
 Lips_ParserInit(Lips_Parser* parser, const char* str, uint32_t len)
 {
   memset(parser, 0, sizeof(Lips_Parser));
@@ -1376,7 +1371,7 @@ Lips_CreateStack(Lips_AllocFunc alloc, Lips_Stack* stack, uint32_t size) {
   stack->size = size;
 }
 
-static void
+void
 Lips_DestroyStack(Lips_DeallocFunc dealloc, Lips_Stack* stack)
 {
   dealloc(stack->data, stack->size);
@@ -1571,47 +1566,6 @@ Lips_HashTableSearchWithHash(const Lips_HashTable* ht, uint32_t hash, const char
   return NULL;
 }
 
-Lips_Cell*
-Lips_HashTableEnsure(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Lips_Stack* stack,
-                     Lips_HashTable* ht, const char* key)
-{
-  uint32_t hash = Lips_ComputeHash(key);
-  return Lips_HashTableEnsureWithHash(alloc, dealloc, stack, ht, hash, key);
-}
-
-Lips_Cell*
-Lips_HashTableEnsureWithHash(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
-                             Lips_Stack* stack, Lips_HashTable* ht,
-                             uint32_t hash, const char* key)
-{
-  if (ht->size == ht->allocated) {
-    uint32_t sz = (ht->size == 0) ? 1 : (ht->size<<1);
-    Lips_HashTableReserve(alloc, dealloc, stack, ht, sz);
-  }
-  Lips_Node* data = LIPS_HASH_TABLE_DATA(ht);
-  uint32_t id = hash;
-  for (uint32_t i = 0; i < ht->allocated; i++) {
-    id = id % ht->allocated;
-    if (LIPS_NODE_VALID(data[id])) {
-      if (strcmp(data[id].key, key) == 0) {
-        return &data[id].value;
-      }
-      // linear probing
-      id++;
-    } else {
-      data[id].hash = hash;
-      data[id].key = key;
-      data[id].value = NULL;
-      // increment the size counter
-      ht->size++;
-      return &data[id].value;
-    }
-  }
-  // unreachable
-  assert(0 && "internal error");
-  return NULL;
-}
-
 void
 Lips_HashTableIterate(Lips_HashTable* ht, Lips_Iterator* it) {
   it->node = LIPS_HASH_TABLE_DATA(ht);
@@ -1704,9 +1658,9 @@ Lips_Cell M_macro(Lips_Interpreter* interpreter, Lips_Cell args, void* udata)
   (void)udata;
   uint32_t len;
   Lips_Cell last = Lips_ListLastElement(interpreter, args, &len);
-  if (len > 255) {
+  if (len > 127) {
     Lips_ThrowError(interpreter,
-                    "Too many arguments(%u), in Lips language callables have up to 255 named arguments", len);
+                    "Too many arguments(%u), in Lips language callables have up to 127 named arguments", len);
   }
   if (last && Lips_IsSymbol(last) && strcmp(LIPS_STR(last)->ptr, "...") == 0) {
     len |= LIPS_NUM_ARGS_VAR;
