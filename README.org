@@ -1,0 +1,28 @@
+#+TITLE: Lips programming language
+#+AUTHOR: Adil Mokhammad
+
+* Roadmap
+
+** Add tests
+
+** User-defined types
+
+** Decent error handling
+
+Implement exceptions via =setjmp= and =longjmp= at Lisp-side and return =NULL= on C-side.
+
+** Efficient string/vector allocator
+
+Reduce number of allocations by merging strings into pages.
+
+** Garbage collector
+
+Use mark-and-sweep algorithm.
+
+** Builtin functions/macros
+
+ 1. arithmetic functions that work both on integers and floats(=+=, =/=, =-= etc.)
+ 2. list managing functions(=car=, =list=, =caddaar= etc.)
+ 3. general functions(===, =nilp=, =typeof= etc.)
+ 4. environment functions(=eval=, =intern= etc.)
+ 5. string functions(=format=, =concat=, =capitalize= etc.)
