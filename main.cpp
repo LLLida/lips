@@ -16,6 +16,7 @@ Lips_Cell F_printf(Lips_Interpreter* interp, Lips_Cell args, void* udata) {
   int n = Lips_PrintCell(interp, args, buffer, sizeof(buffer));
   printf("Printf: %s\n", buffer);
   return Lips_NewStringN(interp, buffer, n);
+  // return args;
 }
 
 int main(int argc, char** argv) {
@@ -68,7 +69,7 @@ int main(int argc, char** argv) {
     const char* test_string = test_strings[i];
     Lips_Cell evaluated_string = Lips_EvalString(interp, test_string, NULL);
     Lips_PrintCell(interp, evaluated_string, buff, sizeof(buff));
-    printf("%s -> %s\n", test_string, buff);
+    printf("Test %d: %s -> %s\n", i, test_string, buff);
   }
 
   Lips_DestroyInterpreter(interp);
