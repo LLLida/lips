@@ -87,12 +87,12 @@ static HashTable* HashTableCreate(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc
                                   Stack* stack);
 static void HashTableDestroy(Stack* stack, HashTable* ht);
 static void HashTableReserve(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
-                                  Stack* stack, HashTable* ht, uint32_t capacity);
+                             Stack* stack, HashTable* ht, uint32_t capacity);
 static Lips_Cell* HashTableInsert(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* stack,
-                                       HashTable* ht, const char* key, Lips_Cell value);
+                                  HashTable* ht, const char* key, Lips_Cell value);
 static Lips_Cell* HashTableInsertWithHash(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* stack,
-                                               HashTable* ht, uint32_t hash,
-                                               const char* key, Lips_Cell value);
+                                          HashTable* ht, uint32_t hash,
+                                          const char* key, Lips_Cell value);
 static Lips_Cell* HashTableSearch(const HashTable* ht, const char* key);
 static Lips_Cell* HashTableSearchWithHash(const HashTable* ht, uint32_t hash, const char* key);
 static void HashTableIterate(HashTable* ht, Iterator* it);
@@ -134,12 +134,12 @@ struct Stack {
   uint32_t size;
 };
 // for debug
-#define PRINT_STACK_DATA(stack) do {                    \
-    printf("Stack[offset=%u, size=%u] data={", (stack).offset, (stack).size);     \
-    for (uint32_t i = 0; i < (stack).offset; i++) {     \
-      putchar((stack).data[i]);                         \
-    }                                                   \
-    printf("}\n");                                      \
+#define PRINT_STACK_DATA(stack) do {                                    \
+    printf("Stack[offset=%u, size=%u] data={", (stack).offset, (stack).size); \
+    for (uint32_t i = 0; i < (stack).offset; i++) {                     \
+      putchar((stack).data[i]);                                         \
+    }                                                                   \
+    printf("}\n");                                                      \
   } while (0)
 
 struct Lips_Value {
@@ -648,7 +648,7 @@ Lips_PrintCell(Lips_Interpreter* interpreter, Lips_Cell cell, char* buff, uint32
         case LIPS_TYPE_PAIR:
           PRINT("(");
           prev = StackRequire(interpreter->alloc, interpreter->dealloc,
-                             &interpreter->stack, sizeof(Lips_Cell));
+                              &interpreter->stack, sizeof(Lips_Cell));
           *prev = GET_TAIL(cell);
           cell = GET_HEAD(cell);
           counter++;
@@ -817,8 +817,8 @@ Lips_Define(Lips_Interpreter* interpreter, const char* name, Lips_Cell cell)
   assert(cell);
   HashTable* env = InterpreterEnv(interpreter);
   Lips_Cell* ptr = HashTableInsert(interpreter->alloc, interpreter->dealloc,
-                                        &interpreter->stack, env,
-                                        name, cell);
+                                   &interpreter->stack, env,
+                                   name, cell);
   if (ptr == NULL) {
     Lips_ThrowError(interpreter, "Value is already defined");
     return NULL;
@@ -833,8 +833,8 @@ Lips_DefineCell(Lips_Interpreter* interpreter, Lips_Cell cell, Lips_Cell value)
   assert(value);
   HashTable* env = InterpreterEnv(interpreter);
   Lips_Cell* ptr = HashTableInsertWithHash(interpreter->alloc, interpreter->dealloc,
-                                                &interpreter->stack, env,
-                                                LIPS_STR(cell)->hash, LIPS_STR(cell)->ptr, value);
+                                           &interpreter->stack, env,
+                                           LIPS_STR(cell)->hash, LIPS_STR(cell)->ptr, value);
   if (ptr == NULL) {
     Lips_ThrowError(interpreter, "Value is already defined");
     return NULL;
@@ -897,7 +897,7 @@ Lips_Invoke(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args)
     args = ev_args;
   }
   if (GET_TYPE(callable) & ((LIPS_TYPE_C_FUNCTION^LIPS_TYPE_FUNCTION)|
-                                 (LIPS_TYPE_C_MACRO^LIPS_TYPE_MACRO))) {
+                            (LIPS_TYPE_C_MACRO^LIPS_TYPE_MACRO))) {
     // just call C function
     ret = callable->data.cfunc.ptr(interpreter, args, callable->data.cfunc.udata);
   } else {
@@ -906,8 +906,8 @@ Lips_Invoke(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args)
     if (argslen > 0) {
       // reserve space for hash table
       HashTableReserve(interpreter->alloc, interpreter->dealloc,
-                            &interpreter->stack, env,
-                            GET_NUMARGS(callable));
+                       &interpreter->stack, env,
+                       GET_NUMARGS(callable));
       // define variables in a new environment
       Lips_Cell argnames = callable->data.lfunc.args;
       while (argnames) {
@@ -1306,7 +1306,7 @@ GenerateAST(Lips_Interpreter* interpreter, Parser* parser)
       break;
     case '"':
       GET_HEAD(cell) = Lips_NewStringN(interpreter,
-                                            parser->currtok.str+1, parser->currtok.length-2);
+                                       parser->currtok.str+1, parser->currtok.length-2);
       break;
     default:
       if (Lips_IsTokenNumber(&parser->currtok)) {
@@ -1402,7 +1402,7 @@ DestroyStack(Lips_DeallocFunc dealloc, Stack* stack)
 
 void*
 StackRequire(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
-                  Stack* stack, uint32_t bytes)
+             Stack* stack, uint32_t bytes)
 {
   if (stack->offset + bytes > stack->size) {
     uint8_t* oldata = stack->data;
@@ -1443,7 +1443,7 @@ HashTable*
 PushEnv(Lips_Interpreter* interpreter)
 {
   HashTable* env = HashTableCreate(interpreter->alloc, interpreter->dealloc,
-                                             &interpreter->stack);
+                                   &interpreter->stack);
   env->parent = interpreter->envpos;
   interpreter->envpos = (uint8_t*)env - interpreter->stack.data;
   return env;
@@ -1529,15 +1529,15 @@ HashTableReserve(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
 
 Lips_Cell*
 HashTableInsert(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* stack,
-                     HashTable* ht, const char* key, Lips_Cell value) {
+                HashTable* ht, const char* key, Lips_Cell value) {
   uint32_t hash = ComputeHash(key);
   return HashTableInsertWithHash(alloc, dealloc, stack, ht, hash, key, value);
 }
 
 Lips_Cell*
 HashTableInsertWithHash(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* stack,
-                             HashTable* ht, uint32_t hash,
-                             const char* key, Lips_Cell value) {
+                        HashTable* ht, uint32_t hash,
+                        const char* key, Lips_Cell value) {
   assert(value && "Can not insert null");
   if (ht->size == ht->allocated) {
     uint32_t sz = (ht->size == 0) ? 1 : (ht->size<<1);
@@ -1630,9 +1630,9 @@ CheckArgumentCount(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell 
   uint32_t listlen = Lips_ListLength(interpreter, args);
   if ((numargs > listlen) ||
       (numargs < listlen && variadic == 0)) {
-        Lips_ThrowError(interpreter,
-                        "Invalid number of arguments, passed %u arguments, but callable accepts %u",
-                        numargs, listlen);
+    Lips_ThrowError(interpreter,
+                    "Invalid number of arguments, passed %u arguments, but callable accepts %u",
+                    numargs, listlen);
   }
   return listlen;
 }
