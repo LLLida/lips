@@ -187,11 +187,13 @@ struct Token {
 
 struct EvalState {
   Lips_Cell sexp;
+  Lips_Cell callable;
   Lips_Cell args;
   Lips_Cell passed_args;
-  Lips_Cell last;
-  Lips_Cell callable;
-  Lips_Cell code;
+  union {
+    Lips_Cell last;
+    Lips_Cell code;
+  } data;
   HashTable* env;
   int stage;
 };
@@ -311,26 +313,26 @@ Lips_Eval(Lips_Interpreter* interpreter, Lips_Cell cell)
       Lips_ThrowError(interpreter, "Eval: undefined symbol '%s'", LIPS_STR(name)->ptr);
     }
     uint32_t argslen = CheckArgumentCount(interpreter, state->callable, state->passed_args);
-    if (Lips_IsFunction(state->callable)) {
+    if (Lips_IsFunction(state->callable)) {n
       state->args = Lips_NewPair(interpreter, NULL, NULL);
-      state->last = state->args;
+      state->data.last = state->args;
     arg:
       while (state->passed_args) {
         // eval arguments
-        if (LIPS_GET_TYPE(LIPS_GET_HEAD(state->passed_args)) == LIPS_TYPE_PAIR) {
+        Lips_Cell argument = LIPS_GET_HEAD(state->passed_args);
+        if (LIPS_GET_TYPE(argument) == LIPS_TYPE_PAIR) {
           counter++;
           StackRequire(interpreter->alloc, interpreter->dealloc,
                             &interpreter->stack, sizeof(EvalState));
           stack = (EvalState*)interpreter->stack.data + oldoffset;
-          stack[counter-1].sexp = LIPS_GET_HEAD(state->passed_args);
+          stack[counter-1].sexp = argument;
           goto eval;
         } else {
-          LIPS_GET_HEAD(state->last) = EvalNonPair(interpreter,
-                                                        LIPS_GET_HEAD(state->passed_args));
+          LIPS_GET_HEAD(state->data.last) = EvalNonPair(interpreter, argument);
           state->passed_args = LIPS_GET_TAIL(state->passed_args);
           if (state->passed_args) {
-            LIPS_GET_TAIL(state->last) = Lips_NewPair(interpreter, NULL, NULL);
-            state->last = LIPS_GET_TAIL(state->last);
+            LIPS_GET_TAIL(state->data.last) = Lips_NewPair(interpreter, NULL, NULL);
+            state->data.last = LIPS_GET_TAIL(state->data.last);
           }
         }
       }
@@ -362,21 +364,22 @@ Lips_Eval(Lips_Interpreter* interpreter, Lips_Cell cell)
         }
       }
       // execute code
-      state->code = state->callable->data.lfunc.body;
+      state->data.code = state->callable->data.lfunc.body;
       state->stage = 1;
     code:
-      while (state->code) {
-        if (LIPS_GET_TYPE(LIPS_GET_HEAD(state->code)) == LIPS_TYPE_PAIR) {
+      while (state->data.code) {
+        if (LIPS_GET_TYPE(LIPS_GET_HEAD(state->data.code)) == LIPS_TYPE_PAIR) {
+          // TODO: implement tail call optimization
           counter++;
           StackRequire(interpreter->alloc, interpreter->dealloc,
                             &interpreter->stack, sizeof(EvalState));
           stack = (EvalState*)interpreter->stack.data + oldoffset;
-          stack[counter-1].sexp = LIPS_GET_HEAD(state->code);
+          stack[counter-1].sexp = LIPS_GET_HEAD(state->data.code);
           goto eval;
         } else {
-          ret = EvalNonPair(interpreter, LIPS_GET_HEAD(state->code));
+          ret = EvalNonPair(interpreter, LIPS_GET_HEAD(state->data.code));
         }
-        state->code = LIPS_GET_TAIL(state->code);
+        state->data.code = LIPS_GET_TAIL(state->data.code);
       }
     }
     counter--;
@@ -387,15 +390,15 @@ Lips_Eval(Lips_Interpreter* interpreter, Lips_Cell cell)
     if (counter > 0) {
       state = &stack[counter-1];
       if (state->stage == 0) {
-        LIPS_GET_HEAD(state->last) = ret;
+        LIPS_GET_HEAD(state->data.last) = ret;
         state->passed_args = LIPS_GET_TAIL(state->passed_args);
         if (state->passed_args) {
-          LIPS_GET_TAIL(state->last) = Lips_NewPair(interpreter, NULL, NULL);
-          state->last = LIPS_GET_TAIL(state->last);
+          LIPS_GET_TAIL(state->data.last) = Lips_NewPair(interpreter, NULL, NULL);
+          state->data.last = LIPS_GET_TAIL(state->data.last);
         }
         goto arg;
       } else {
-        state->code = LIPS_GET_TAIL(state->code);
+        state->data.code = LIPS_GET_TAIL(state->data.code);
         goto code;
       }
     }
