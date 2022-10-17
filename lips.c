@@ -11,13 +11,13 @@
 /// CONSTANTS
 
 // number of values in one bucket
-#ifndef LIPS_BUCKET_SIZE
-#define LIPS_BUCKET_SIZE 1024
+#ifndef BUCKET_SIZE
+#define BUCKET_SIZE 1024
 #endif
 
 // number buckets that Interpreter allocates by default
-#ifndef LIPS_NUM_DEFAULT_BUCKETS
-#define LIPS_NUM_DEFAULT_BUCKETS 16
+#ifndef NUM_DEFAULT_BUCKETS
+#define NUM_DEFAULT_BUCKETS 16
 #endif
 
 /// LIST OF STRUCTS
@@ -35,16 +35,15 @@ typedef struct EvalState EvalState;
 /// MACROS
 
 #define LIPS_EOF (-1)
-#define LIPS_DEAD_MASK (1<<31)
-#define LIPS_IS_DEAD(cell) ((cell).type & LIPS_DEAD_MASK)
-#define LIPS_IS_WHITESPACE(c) ((c) == ' ' || (c) == '\n' || (c) == '\t' || (c) == '\r')
-#define LIPS_IS_SPECIAL_CHAR(c) ((c) == '(' || (c) == ')' || (c) == '\'' || (c) == '`')
-#define LIPS_IS_DIGIT(c) ((c) >= '0' && (c) <= '9')
-#define LIPS_LOG_ERROR(interpreter, ...) snprintf(interpreter->errbuff, sizeof(interpreter->errbuff), __VA_ARGS__)
-#define LIPS_TYPE_CHECK(interpreter, type, cell) if (!(GET_TYPE(cell) & (type))) Lips_ThrowError(interpreter, "Typecheck failed (%d & %d)", GET_TYPE(cell), type);
-#define LIPS_STR(cell) (cell->data.str)
-#define LIPS_STR_PTR(str) (str->ptr)
-#define LIPS_STR_LEN(str) (str->length)
+#define STACK_INVALID_POS ((uint32_t)-1)
+#define DEAD_MASK (1<<31)
+#define IS_DEAD(cell) ((cell).type & DEAD_MASK)
+#define IS_WHITESPACE(c) ((c) == ' ' || (c) == '\n' || (c) == '\t' || (c) == '\r')
+#define IS_SPECIAL_CHAR(c) ((c) == '(' || (c) == ')' || (c) == '\'' || (c) == '`')
+#define IS_DIGIT(c) ((c) >= '0' && (c) <= '9')
+#define LOG_ERROR(interpreter, ...) snprintf(interpreter->errbuff, sizeof(interpreter->errbuff), __VA_ARGS__)
+#define TYPE_CHECK(interpreter, type, cell) if (!(GET_TYPE(cell) & (type))) Lips_ThrowError(interpreter, "Typecheck failed (%d & %d)", GET_TYPE(cell), type);
+#define GET_STR(cell) (cell->data.str)
 
 /// LIST OF FUNCTIONS
 
@@ -75,8 +74,11 @@ static void CreateStack(Lips_AllocFunc alloc, Stack* stack, uint32_t size);
 static void DestroyStack(Lips_DeallocFunc dealloc, Stack* stack);
 static void* StackRequire(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
                           Stack* stack, uint32_t bytes);
-// number of releaased bytes returned
+// number of released bytes returned
 static uint32_t StackRelease(Stack* stack, void* data);
+
+static EvalState* PushEvalState(Lips_Interpreter* interpreter);
+static EvalState* PopEvalState(Lips_Interpreter* interpreter);
 
 static HashTable* InterpreterEnv(Lips_Interpreter* interpreter);
 static HashTable* PushEnv(Lips_Interpreter* interpreter);
@@ -206,8 +208,9 @@ struct EvalState {
     } args;
     Lips_Cell code;
   } data;
-  int flags;
-  EvalState* parent;
+  uint32_t flags;
+  // parent's position in stack
+  uint32_t parent;
 };
 #define ES_NUM_ENVS(es) ((es)->flags >> 1)
 #define ES_STAGE(es) ((es)->flags & 1)
@@ -235,6 +238,7 @@ struct Lips_Interpreter {
   uint32_t allocbuckets;
   Stack stack;
   uint32_t envpos;
+  uint32_t evalpos;
   jmp_buf jmp; // this is used for exceptions
   Lips_Cell S_nil;
   Lips_Cell S_filename;
@@ -256,8 +260,9 @@ Lips_CreateInterpreter(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc)
   interp->allocbuckets = 1;
   CreateStack(alloc, &interp->stack, 16*1024);
   HashTable* env = HashTableCreate(interp->alloc, interp->dealloc, &interp->stack);
-  env->parent = (uint32_t)-1;
+  env->parent = STACK_INVALID_POS;
   interp->envpos = ((uint8_t*)env - interp->stack.data);
+  interp->evalpos = STACK_INVALID_POS;
   // define builtins
   interp->S_nil = Lips_NewPair(interp, NULL, NULL);
   interp->S_filename = Lips_NewPair(interp, NULL, NULL);
@@ -285,7 +290,7 @@ Lips_DestroyInterpreter(Lips_Interpreter* interpreter)
 }
 
 LIPS_HOT_FUNCTION Lips_Cell
-Lips_Eval(Lips_Interpreter* interpreter, Lips_Cell cell)
+Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
 {
 #if 0
   // recursive version(easily readable)
@@ -300,10 +305,10 @@ Lips_Eval(Lips_Interpreter* interpreter, Lips_Cell cell)
   case LIPS_TYPE_PAIR: {
     Lips_Cell name = GET_HEAD(cell);
     Lips_Cell args = GET_TAIL(cell);
-    LIPS_TYPE_CHECK(interpreter, LIPS_TYPE_SYMBOL, name);
+    TYPE_CHECK(interpreter, LIPS_TYPE_SYMBOL, name);
     Lips_Cell callable = Lips_InternCell(interpreter, name);
     if (callable == NULL || callable == interpreter->S_nil) {
-      Lips_ThrowError(interpreter, "Eval: undefined symbol '%s'", LIPS_STR(name)->ptr);
+      Lips_ThrowError(interpreter, "Eval: undefined symbol '%s'", GET_STR(name)->ptr);
     }
     return Lips_Invoke(interpreter, callable, args);
   }
@@ -314,39 +319,35 @@ Lips_Eval(Lips_Interpreter* interpreter, Lips_Cell cell)
   if (GET_TYPE(cell) == LIPS_TYPE_PAIR) {
     Lips_Cell ret;
     Lips_Cell name;
-    EvalState* state = StackRequire(interpreter->alloc, interpreter->dealloc,
-                                    &interpreter->stack, sizeof(EvalState));
+    const uint32_t startpos = interp->evalpos;
+    EvalState* state = PushEvalState(interp);
     state->sexp = cell;
-    state->parent = NULL;
   eval:
     state->flags = 0;
     name = GET_HEAD(state->sexp);
     state->passed_args = GET_TAIL(state->sexp);
-    LIPS_TYPE_CHECK(interpreter, LIPS_TYPE_SYMBOL, name);
-    state->callable = Lips_InternCell(interpreter, name);
+    TYPE_CHECK(interp, LIPS_TYPE_SYMBOL, name);
+    state->callable = Lips_InternCell(interp, name);
     if (state->callable == NULL) {
-      Lips_ThrowError(interpreter, "Eval: undefined symbol '%s'", LIPS_STR(name)->ptr);
+      Lips_ThrowError(interp, "Eval: undefined symbol '%s'", GET_STR(name)->ptr);
     }
-    ES_ARG_COUNT(state) = CheckArgumentCount(interpreter, state->callable, state->passed_args);
+    ES_ARG_COUNT(state) = CheckArgumentCount(interp, state->callable, state->passed_args);
     if (Lips_IsFunction(state->callable)) {
-      state->args = Lips_NewPair(interpreter, NULL, NULL);
+      state->args = Lips_NewPair(interp, NULL, NULL);
       ES_LAST_ARG(state) = state->args;
     arg:
       while (state->passed_args) {
         // eval arguments
         Lips_Cell argument = GET_HEAD(state->passed_args);
         if (GET_TYPE(argument) == LIPS_TYPE_PAIR) {
-          EvalState* newstate = StackRequire(interpreter->alloc, interpreter->dealloc,
-                                             &interpreter->stack, sizeof(EvalState));
-          newstate->parent = state;
-          state = newstate;
+          state = PushEvalState(interp);
           state->sexp = argument;
           goto eval;
         } else {
-          GET_HEAD(ES_LAST_ARG(state)) = EvalNonPair(interpreter, argument);
+          GET_HEAD(ES_LAST_ARG(state)) = EvalNonPair(interp, argument);
           state->passed_args = GET_TAIL(state->passed_args);
           if (state->passed_args) {
-            GET_TAIL(ES_LAST_ARG(state)) = Lips_NewPair(interpreter, NULL, NULL);
+            GET_TAIL(ES_LAST_ARG(state)) = Lips_NewPair(interp, NULL, NULL);
             ES_LAST_ARG(state) = GET_TAIL(ES_LAST_ARG(state));
           }
         }
@@ -356,27 +357,24 @@ Lips_Eval(Lips_Interpreter* interpreter, Lips_Cell cell)
     }
     if (GET_TYPE(state->callable) & ((LIPS_TYPE_C_FUNCTION^LIPS_TYPE_FUNCTION)|
                                      (LIPS_TYPE_C_MACRO^LIPS_TYPE_MACRO))) {
-      /* PRINT_STACK_DATA(interpreter->stack); */
       // just call C function
       Lips_Cell c = state->callable;
-      ret = c->data.cfunc.ptr(interpreter, state->args, c->data.cfunc.udata);
-      /* PRINT_STACK_DATA(interpreter->stack); */
+      ret = c->data.cfunc.ptr(interp, state->args, c->data.cfunc.udata);
     } else {
       // push a new environment
-      HashTable* env = PushEnv(interpreter);
+      HashTable* env = PushEnv(interp);
       ES_INC_NUM_ENVS(state);
       if (ES_ARG_COUNT(state) > 0) {
         // reserve space for hash table
         uint32_t sz = (GET_NUMARGS(state->callable) & 127) + (GET_NUMARGS(state->callable) >> 7);
-        HashTableReserve(interpreter->alloc, interpreter->dealloc,
-                         &interpreter->stack, env,
-                         sz);
+        HashTableReserve(interp->alloc, interp->dealloc,
+                         &interp->stack, env, sz);
         // define variables in a new environment
         Lips_Cell argnames = state->callable->data.lfunc.args;
         Lips_Cell argvalues = state->args;
         while (argnames) {
           if (GET_HEAD(argnames)) {
-            Lips_DefineCell(interpreter, GET_HEAD(argnames), GET_HEAD(argvalues));
+            Lips_DefineCell(interp, GET_HEAD(argnames), GET_HEAD(argvalues));
           }
           argnames = GET_TAIL(argnames);
           argvalues = GET_TAIL(argvalues);
@@ -390,30 +388,25 @@ Lips_Eval(Lips_Interpreter* interpreter, Lips_Cell cell)
         Lips_Cell expression = GET_HEAD(ES_CODE(state));
         if (GET_TYPE(expression) == LIPS_TYPE_PAIR) {
           // TODO: implement tail call optimization
-          EvalState* newstate = StackRequire(interpreter->alloc, interpreter->dealloc,
-                                             &interpreter->stack, sizeof(EvalState));
-          newstate->parent = state;
-          state = newstate;
+          state = PushEvalState(interp);
           state->sexp = expression;
           goto eval;
         } else {
-          ret = EvalNonPair(interpreter, expression);
+          ret = EvalNonPair(interp, expression);
         }
         ES_CODE(state) = GET_TAIL(ES_CODE(state));
       }
     }
-    for (int i = 0; i < ES_NUM_ENVS(state); i++) {
-      PopEnv(interpreter);
+    for (uint32_t i = 0; i < ES_NUM_ENVS(state); i++) {
+      PopEnv(interp);
     }
-    if (state->parent != NULL) {
-      EvalState* child = state;
-      state = state->parent;
-      StackRelease(&interpreter->stack, child);
+    state = PopEvalState(interp);
+    if (interp->evalpos != startpos) {
       if (ES_STAGE(state) == 0) {
         GET_HEAD(ES_LAST_ARG(state)) = ret;
         state->passed_args = GET_TAIL(state->passed_args);
         if (state->passed_args) {
-          GET_TAIL(ES_LAST_ARG(state)) = Lips_NewPair(interpreter, NULL, NULL);
+          GET_TAIL(ES_LAST_ARG(state)) = Lips_NewPair(interp, NULL, NULL);
           ES_LAST_ARG(state) = GET_TAIL(ES_LAST_ARG(state));
         }
         goto arg;
@@ -422,10 +415,9 @@ Lips_Eval(Lips_Interpreter* interpreter, Lips_Cell cell)
         goto code;
       }
     }
-    StackRelease(&interpreter->stack, state);
     return ret;
   } else {
-    return EvalNonPair(interpreter, cell);
+    return EvalNonPair(interp, cell);
   }
 #endif
   return cell;
@@ -493,8 +485,8 @@ Lips_NewStringN(Lips_Interpreter* interpreter, const char* str, uint32_t n)
 {
   Lips_Cell cell = NewCell(interpreter);
   cell->type = LIPS_TYPE_STRING;
-  LIPS_STR(cell) = StringCreate(interpreter->alloc);
-  StringAllocate(LIPS_STR(cell), interpreter->alloc, str, n);
+  GET_STR(cell) = StringCreate(interpreter->alloc);
+  StringAllocate(GET_STR(cell), interpreter->alloc, str, n);
   return cell;
 }
 
@@ -509,8 +501,8 @@ Lips_NewSymbolN(Lips_Interpreter* interpreter, const char* str, uint32_t n)
 {
   Lips_Cell cell = NewCell(interpreter);
   cell->type = LIPS_TYPE_SYMBOL;
-  LIPS_STR(cell) = StringCreate(interpreter->alloc);
-  StringAllocate(LIPS_STR(cell), interpreter->alloc, str, n);
+  GET_STR(cell) = StringCreate(interpreter->alloc);
+  StringAllocate(GET_STR(cell), interpreter->alloc, str, n);
   return cell;
 }
 
@@ -737,7 +729,7 @@ Lips_PrintCell(Lips_Interpreter* interpreter, Lips_Cell cell, char* buff, uint32
 uint32_t
 Lips_ListLength(Lips_Interpreter* interp, Lips_Cell list)
 {
-  LIPS_TYPE_CHECK(interp, LIPS_TYPE_PAIR, list);
+  TYPE_CHECK(interp, LIPS_TYPE_PAIR, list);
   uint32_t count = 0;
   if (GET_HEAD(list) == NULL) {
     assert(GET_TAIL(list) == NULL && "internal error: list semantic error");
@@ -754,7 +746,7 @@ Lips_ListLength(Lips_Interpreter* interp, Lips_Cell list)
 Lips_Cell
 Lips_ListLastElement(Lips_Interpreter* interpreter, Lips_Cell list, uint32_t* length)
 {
-  LIPS_TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, list);
+  TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, list);
   Lips_Cell ret;
   uint32_t count = 0;
   if (GET_HEAD(list) == NULL) {
@@ -777,7 +769,7 @@ Lips_ListLastElement(Lips_Interpreter* interpreter, Lips_Cell list, uint32_t* le
 Lips_Cell
 Lips_ListPushBack(Lips_Interpreter* interp, Lips_Cell list, Lips_Cell elem)
 {
-  LIPS_TYPE_CHECK(interp, LIPS_TYPE_PAIR, list);
+  TYPE_CHECK(interp, LIPS_TYPE_PAIR, list);
   if (GET_HEAD(list) == NULL) {
     GET_HEAD(list) = elem;
   } else {
@@ -792,7 +784,7 @@ Lips_ListPushBack(Lips_Interpreter* interp, Lips_Cell list, Lips_Cell elem)
 Lips_Cell
 Lips_ListPopBack(Lips_Interpreter* interp, Lips_Cell list)
 {
-  LIPS_TYPE_CHECK(interp, LIPS_TYPE_PAIR, list);
+  TYPE_CHECK(interp, LIPS_TYPE_PAIR, list);
   Lips_Cell ret;
   if (GET_TAIL(list) == NULL) {
     assert(GET_HEAD(list) && "empty list");
@@ -829,12 +821,12 @@ Lips_Define(Lips_Interpreter* interpreter, const char* name, Lips_Cell cell)
 Lips_Cell
 Lips_DefineCell(Lips_Interpreter* interpreter, Lips_Cell cell, Lips_Cell value)
 {
-  LIPS_TYPE_CHECK(interpreter, LIPS_TYPE_SYMBOL|LIPS_TYPE_STRING, cell);
+  TYPE_CHECK(interpreter, LIPS_TYPE_SYMBOL|LIPS_TYPE_STRING, cell);
   assert(value);
   HashTable* env = InterpreterEnv(interpreter);
   Lips_Cell* ptr = HashTableInsertWithHash(interpreter->alloc, interpreter->dealloc,
                                            &interpreter->stack, env,
-                                           LIPS_STR(cell)->hash, LIPS_STR(cell)->ptr, value);
+                                           GET_STR(cell)->hash, GET_STR(cell)->ptr, value);
   if (ptr == NULL) {
     Lips_ThrowError(interpreter, "Value is already defined");
     return NULL;
@@ -859,10 +851,10 @@ Lips_Intern(Lips_Interpreter* interpreter, const char* name)
 LIPS_HOT_FUNCTION Lips_Cell
 Lips_InternCell(Lips_Interpreter* interpreter, Lips_Cell cell)
 {
-  LIPS_TYPE_CHECK(interpreter, LIPS_TYPE_SYMBOL|LIPS_TYPE_STRING, cell);
+  TYPE_CHECK(interpreter, LIPS_TYPE_SYMBOL|LIPS_TYPE_STRING, cell);
   HashTable* env = InterpreterEnv(interpreter);
   do {
-    Lips_Cell* ptr = HashTableSearchWithHash(env, LIPS_STR(cell)->hash, LIPS_STR(cell)->ptr);
+    Lips_Cell* ptr = HashTableSearchWithHash(env, GET_STR(cell)->hash, GET_STR(cell)->ptr);
     if (ptr) {
       return *ptr;
     }
@@ -875,8 +867,8 @@ LIPS_HOT_FUNCTION Lips_Cell
 Lips_Invoke(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args)
 {
   Lips_Cell ret;
-  LIPS_TYPE_CHECK(interpreter, LIPS_TYPE_FUNCTION|LIPS_TYPE_MACRO, callable);
-  LIPS_TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, args);
+  TYPE_CHECK(interpreter, LIPS_TYPE_FUNCTION|LIPS_TYPE_MACRO, callable);
+  TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, args);
   uint32_t argslen = CheckArgumentCount(interpreter, callable, args);
   // evaluate arguments
   if (Lips_IsFunction(callable)) {
@@ -948,7 +940,7 @@ int64_t
 Lips_GetInteger(Lips_Interpreter* interpreter, Lips_Cell cell)
 {
   (void)interpreter;
-  LIPS_TYPE_CHECK(interpreter, LIPS_TYPE_INTEGER, cell);
+  TYPE_CHECK(interpreter, LIPS_TYPE_INTEGER, cell);
   return GET_INTEGER(cell);
 }
 
@@ -956,7 +948,7 @@ double
 Lips_GetReal(Lips_Interpreter* interpreter, Lips_Cell cell)
 {
   (void)interpreter;
-  LIPS_TYPE_CHECK(interpreter, LIPS_TYPE_REAL, cell);
+  TYPE_CHECK(interpreter, LIPS_TYPE_REAL, cell);
   return GET_REAL(cell);
 }
 
@@ -964,7 +956,7 @@ const char*
 Lips_GetString(Lips_Interpreter* interpreter, Lips_Cell cell)
 {
   (void)interpreter;
-  LIPS_TYPE_CHECK(interpreter, LIPS_TYPE_STRING|LIPS_TYPE_SYMBOL, cell);
+  TYPE_CHECK(interpreter, LIPS_TYPE_STRING|LIPS_TYPE_SYMBOL, cell);
   return GET_STRING(cell);
 }
 
@@ -972,7 +964,7 @@ Lips_Cell
 Lips_CAR(Lips_Interpreter* interpreter, Lips_Cell cell)
 {
   (void)interpreter;
-  LIPS_TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, cell);
+  TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, cell);
   return GET_HEAD(cell);
 }
 
@@ -980,7 +972,7 @@ Lips_Cell
 Lips_CDR(Lips_Interpreter* interpreter, Lips_Cell cell)
 {
   (void)interpreter;
-  LIPS_TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, cell);
+  TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, cell);
   return GET_TAIL(cell);
 }
 
@@ -1011,7 +1003,7 @@ DestroyCell(Lips_Cell cell, Lips_DeallocFunc dealloc) {
     break;
   case LIPS_TYPE_STRING:
   case LIPS_TYPE_SYMBOL:
-    StringDestroy(LIPS_STR(cell), dealloc);
+    StringDestroy(GET_STR(cell), dealloc);
     break;
   case LIPS_TYPE_PAIR:
 
@@ -1112,11 +1104,11 @@ ParserNextToken(Parser* parser)
     if (text[parser->pos] == ';')
       while (parser->pos < parser->length && text[parser->pos] != '\n' && text[parser->pos] != '\r')
         parser->pos++;
-    while (parser->pos < parser->length && LIPS_IS_WHITESPACE(text[parser->pos]))
+    while (parser->pos < parser->length && IS_WHITESPACE(text[parser->pos]))
       parser->pos++;
   } while(text[parser->pos] == ';');
   if (parser->pos >= parser->length) return 0;
-  if (LIPS_IS_SPECIAL_CHAR(text[parser->pos])) {
+  if (IS_SPECIAL_CHAR(text[parser->pos])) {
     token->str = text+parser->pos;
     token->length = 1;
   } else if (text[parser->pos] == '"') {
@@ -1135,7 +1127,7 @@ ParserNextToken(Parser* parser)
     // parse symbol or number
     uint32_t end = parser->pos + 1;
     while (end < parser->length) {
-      if (LIPS_IS_WHITESPACE(text[end]) || LIPS_IS_SPECIAL_CHAR(text[end]))
+      if (IS_WHITESPACE(text[end]) || IS_SPECIAL_CHAR(text[end]))
         break;
       if (text[end] == ';') {
         // skip comment
@@ -1154,27 +1146,27 @@ ParserNextToken(Parser* parser)
 
 int
 Lips_IsTokenNumber(const Token* token) {
-  return LIPS_IS_DIGIT(token->str[0]) ||
-    (token->str[0] == '-' && LIPS_IS_DIGIT(token->str[1]));
+  return IS_DIGIT(token->str[0]) ||
+    (token->str[0] == '-' && IS_DIGIT(token->str[1]));
 }
 
 Lips_Cell
 ParseNumber(Lips_Interpreter* interpreter, const Token* token) {
   int is_float = 0;
   for (uint32_t i = 0; i < token->length; i++) {
-    if (!LIPS_IS_DIGIT(token->str[i])) {
+    if (!IS_DIGIT(token->str[i])) {
       if (token->str[i] == '.') {
         is_float++;
       } else {
-        LIPS_LOG_ERROR(interpreter, "Found undefined character '%c' when parsing number in token '%.*s'",
-                       token->str[i], token->length, token->str);
+        LOG_ERROR(interpreter, "Found undefined character '%c' when parsing number in token '%.*s'",
+                  token->str[i], token->length, token->str);
         return NULL;
       }
     }
   }
   if (is_float > 1) {
-    LIPS_LOG_ERROR(interpreter, "Encountered more than 1 '.' when parsing float in token '%.*s'",
-                   token->length, token->str);
+    LOG_ERROR(interpreter, "Encountered more than 1 '.' when parsing float in token '%.*s'",
+              token->length, token->str);
     return NULL;
   }
   // TODO: use strtod and strtoll correctly
@@ -1189,7 +1181,7 @@ LIPS_HOT_FUNCTION Lips_Cell
 NewCell(Lips_Interpreter* interp)
 {
   for (uint32_t i = interp->numbuckets; i > 0; i--)
-    if (interp->buckets[i-1].size < LIPS_BUCKET_SIZE) {
+    if (interp->buckets[i-1].size < BUCKET_SIZE) {
       // we found a bucket with available storage, use it
       return BucketNewCell(&interp->buckets[i-1]);
     }
@@ -1218,7 +1210,7 @@ GenerateAST(Lips_Interpreter* interpreter, Parser* parser)
   Lips_Cell cell = NULL;
   int code = ParserNextToken(parser);
   if (code == LIPS_EOF) {
-    LIPS_LOG_ERROR(interpreter, "EOF: expected \"");
+    LOG_ERROR(interpreter, "EOF: expected \"");
   } else if (code == 1) {
     switch (parser->currtok.str[0]) {
     case '(':
@@ -1329,7 +1321,7 @@ GenerateAST(Lips_Interpreter* interpreter, Parser* parser)
   }
   assert(counter == 0 && "parser internal error"); // I think this is useful, should I remove it?
   if (code == LIPS_EOF) {
-    LIPS_LOG_ERROR(interpreter, "EOF: expected \"");
+    LOG_ERROR(interpreter, "EOF: expected \"");
   }
   Lips_Cell ret = stack[0];
   assert(StackRelease(&interpreter->stack, stack) == numbytes);
@@ -1341,11 +1333,11 @@ void
 CreateBucket(Lips_AllocFunc alloc, Bucket* bucket)
 {
   uint32_t i;
-  bucket->data = (Lips_Value*)alloc(LIPS_BUCKET_SIZE * sizeof(Lips_Value));
+  bucket->data = (Lips_Value*)alloc(BUCKET_SIZE * sizeof(Lips_Value));
   bucket->size = 0;
   bucket->next = 0;
-  for (i = 0; i < LIPS_BUCKET_SIZE; i++) {
-    *(uint32_t*)&bucket->data[i] = (i + 1) | LIPS_DEAD_MASK;
+  for (i = 0; i < BUCKET_SIZE; i++) {
+    *(uint32_t*)&bucket->data[i] = (i + 1) | DEAD_MASK;
   }
 }
 
@@ -1355,21 +1347,21 @@ DestroyBucket(Lips_DeallocFunc dealloc, Bucket* bucket)
   // destroy each cell in bucket
   for (uint32_t i = 0; bucket->size > 0; i++) {
     Lips_Cell cell = bucket->data + i;
-    if ((cell->type & LIPS_DEAD_MASK) == 0) {
+    if ((cell->type & DEAD_MASK) == 0) {
       DestroyCell(cell, dealloc);
       bucket->size--;
     }
   }
   // free bucket's memory
-  dealloc(bucket->data, sizeof(Lips_Value) * LIPS_BUCKET_SIZE);
+  dealloc(bucket->data, sizeof(Lips_Value) * BUCKET_SIZE);
 }
 
 Lips_Cell
 BucketNewCell(Bucket* bucket)
 {
-  assert(bucket->size < LIPS_BUCKET_SIZE && "Bucket out of space");
+  assert(bucket->size < BUCKET_SIZE && "Bucket out of space");
   Lips_Cell ret = &bucket->data[bucket->next];
-  bucket->next = *(uint32_t*)ret ^ LIPS_DEAD_MASK;
+  bucket->next = *(uint32_t*)ret ^ DEAD_MASK;
   bucket->size++;
   return ret;
 }
@@ -1378,9 +1370,9 @@ void
 BucketDeleteCell(Bucket* bucket, Lips_Cell cell)
 {
   uint32_t index = cell - bucket->data;
-  assert(index < LIPS_BUCKET_SIZE && "cell doesn't belong to this Bucket");
+  assert(index < BUCKET_SIZE && "cell doesn't belong to this Bucket");
   assert(bucket->size > 0 && "Bucket is empty");
-  *(uint32_t*)cell = bucket->next | LIPS_DEAD_MASK;
+  *(uint32_t*)cell = bucket->next | DEAD_MASK;
   bucket->next = index;
   bucket->size--;
 }
@@ -1432,6 +1424,28 @@ StackRelease(Stack* stack, void* data)
   return bytes;
 }
 
+EvalState*
+PushEvalState(Lips_Interpreter* interpreter)
+{
+  EvalState* newstate = StackRequire(interpreter->alloc, interpreter->dealloc,
+                                     &interpreter->stack, sizeof(EvalState));
+  newstate->parent = interpreter->evalpos;
+  interpreter->evalpos = (uint8_t*)newstate - interpreter->stack.data;
+  return newstate;
+}
+
+EvalState*
+PopEvalState(Lips_Interpreter* interpreter)
+{
+  EvalState* child = (EvalState*)(interpreter->stack.data + interpreter->evalpos);
+  interpreter->evalpos = child->parent;
+  assert(StackRelease(&interpreter->stack, child) == sizeof(EvalState));
+  if (interpreter->evalpos == STACK_INVALID_POS) {
+    return NULL;
+  }
+  return (EvalState*)(interpreter->stack.data + interpreter->evalpos);
+}
+
 HashTable*
 InterpreterEnv(Lips_Interpreter* interpreter)
 {
@@ -1460,7 +1474,7 @@ PopEnv(Lips_Interpreter* interpreter)
 HashTable*
 EnvParent(Lips_Interpreter* interpreter, HashTable* env)
 {
-  if (env->parent == (uint32_t)-1) {
+  if (env->parent == STACK_INVALID_POS) {
     return NULL;
   }
   HashTable* parent = (HashTable*)(interpreter->stack.data + env->parent);
@@ -1659,7 +1673,7 @@ EvalNonPair(Lips_Interpreter* interpreter, Lips_Cell cell)
 Lips_Cell
 M_lambda(Lips_Interpreter* interpreter, Lips_Cell args, void* udata)
 {
-  LIPS_TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, GET_HEAD(args));
+  TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, GET_HEAD(args));
   (void)udata;
   uint32_t len;
   Lips_Cell last = Lips_ListLastElement(interpreter, GET_HEAD(args), &len);
@@ -1667,7 +1681,7 @@ M_lambda(Lips_Interpreter* interpreter, Lips_Cell args, void* udata)
     Lips_ThrowError(interpreter,
                     "Too many arguments(%u), in Lips language callables have up to 127 named arguments", len);
   }
-  if (last && Lips_IsSymbol(last) && strcmp(LIPS_STR(last)->ptr, "...") == 0) {
+  if (last && Lips_IsSymbol(last) && strcmp(GET_STR(last)->ptr, "...") == 0) {
     len |= LIPS_NUM_ARGS_VAR;
   }
   Lips_Cell lambda = Lips_NewFunction(interpreter, GET_HEAD(args), GET_TAIL(args), len);
@@ -1676,7 +1690,7 @@ M_lambda(Lips_Interpreter* interpreter, Lips_Cell args, void* udata)
 
 Lips_Cell M_macro(Lips_Interpreter* interpreter, Lips_Cell args, void* udata)
 {
-  LIPS_TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, GET_HEAD(args));
+  TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, GET_HEAD(args));
   (void)udata;
   uint32_t len;
   Lips_Cell last = Lips_ListLastElement(interpreter, args, &len);
@@ -1684,7 +1698,7 @@ Lips_Cell M_macro(Lips_Interpreter* interpreter, Lips_Cell args, void* udata)
     Lips_ThrowError(interpreter,
                     "Too many arguments(%u), in Lips language callables have up to 127 named arguments", len);
   }
-  if (last && Lips_IsSymbol(last) && strcmp(LIPS_STR(last)->ptr, "...") == 0) {
+  if (last && Lips_IsSymbol(last) && strcmp(GET_STR(last)->ptr, "...") == 0) {
     len |= LIPS_NUM_ARGS_VAR;
   }
   Lips_Cell macro = Lips_NewMacro(interpreter, GET_HEAD(args), GET_TAIL(args), len);
