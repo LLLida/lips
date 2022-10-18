@@ -103,6 +103,7 @@ static void IteratorGet(const Iterator* it, const char** key, Lips_Cell* value);
 static void IteratorNext(Iterator* it);
 
 static uint32_t CheckArgumentCount(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args);
+static void DefineArguments(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell argvalues);
 static Lips_Cell EvalNonPair(Lips_Interpreter* interpreter, Lips_Cell cell);
 
 static Lips_Cell M_lambda(Lips_Interpreter* interpreter, Lips_Cell args, void* udata);
@@ -362,29 +363,15 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
       ret = c->data.cfunc.ptr(interp, state->args, c->data.cfunc.udata);
     } else {
       // push a new environment
-      HashTable* env = PushEnv(interp);
+      PushEnv(interp);
       ES_INC_NUM_ENVS(state);
-      if (ES_ARG_COUNT(state) > 0) {
-        // reserve space for hash table
-        uint32_t sz = (GET_NUMARGS(state->callable) & 127) + (GET_NUMARGS(state->callable) >> 7);
-        HashTableReserve(interp->alloc, interp->dealloc,
-                         &interp->stack, env, sz);
-        // define variables in a new environment
-        Lips_Cell argnames = state->callable->data.lfunc.args;
-        Lips_Cell argvalues = state->args;
-        while (argnames) {
-          if (GET_HEAD(argnames)) {
-            Lips_DefineCell(interp, GET_HEAD(argnames), GET_HEAD(argvalues));
-          }
-          argnames = GET_TAIL(argnames);
-          argvalues = GET_TAIL(argvalues);
-        }
-      }
+      if (ES_ARG_COUNT(state) > 0)
+        DefineArguments(interp, state->callable, state->args);
       // execute code
       ES_CODE(state) = state->callable->data.lfunc.body;
       ES_INC_STAGE(state);
     code:
-      while (state->data.code) {
+      while (ES_CODE(state)) {
         Lips_Cell expression = GET_HEAD(ES_CODE(state));
         if (GET_TYPE(expression) == LIPS_TYPE_PAIR) {
           // TODO: implement tail call optimization
@@ -397,6 +384,7 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
         ES_CODE(state) = GET_TAIL(ES_CODE(state));
       }
     }
+    // because of tail call optimization 1 state may have more than 1 environments
     for (uint32_t i = 0; i < ES_NUM_ENVS(state); i++) {
       PopEnv(interp);
     }
@@ -894,22 +882,9 @@ Lips_Invoke(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args)
     ret = callable->data.cfunc.ptr(interpreter, args, callable->data.cfunc.udata);
   } else {
     // push a new environment
-    HashTable* env = PushEnv(interpreter);
-    if (argslen > 0) {
-      // reserve space for hash table
-      HashTableReserve(interpreter->alloc, interpreter->dealloc,
-                       &interpreter->stack, env,
-                       GET_NUMARGS(callable));
-      // define variables in a new environment
-      Lips_Cell argnames = callable->data.lfunc.args;
-      while (argnames) {
-        if (GET_HEAD(argnames)) {
-          Lips_DefineCell(interpreter, GET_HEAD(argnames), GET_HEAD(args));
-        }
-        argnames = GET_TAIL(argnames);
-        args = GET_TAIL(args);
-      }
-    }
+    PushEnv(interpreter);
+    if (argslen > 0)
+      DefineArguments(interpreter, callable, args);
     // execute code
     Lips_Cell code = callable->data.lfunc.body;
     while (code) {
@@ -1649,6 +1624,27 @@ CheckArgumentCount(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell 
                     numargs, listlen);
   }
   return listlen;
+}
+
+void
+DefineArguments(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell argvalues)
+{
+  TYPE_CHECK(interpreter, LIPS_TYPE_FUNCTION|LIPS_TYPE_MACRO, callable);
+  TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, argvalues);
+  // reserve space for hash table
+  uint32_t sz = (GET_NUMARGS(callable) & 127) + (GET_NUMARGS(callable) >> 7);
+  HashTableReserve(interpreter->alloc, interpreter->dealloc,
+                   &interpreter->stack, InterpreterEnv(interpreter),
+                   sz);
+  // define variables in a new environment
+  Lips_Cell argnames = callable->data.lfunc.args;
+  while (argnames) {
+    if (GET_HEAD(argnames)) {
+      Lips_DefineCell(interpreter, GET_HEAD(argnames), GET_HEAD(argvalues));
+    }
+    argnames = GET_TAIL(argnames);
+    argvalues = GET_TAIL(argvalues);
+  }
 }
 
 Lips_Cell

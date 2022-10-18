@@ -21,8 +21,7 @@ Lips_Cell F_printf(Lips_Interpreter* interp, Lips_Cell args, void* udata) {
 
 int main(int argc, char** argv) {
   interp = Lips_DefaultCreateInterpreter();
-  printf("Hello world\n");
-  printf("interp: %p\n", interp);
+
   Lips_Cell num = Lips_NewInteger(interp, 65);
   printf("is integer: %d\n", Lips_IsInteger(num));
   char buff[256];

@@ -30,8 +30,15 @@ else ()
   )
 endif()
 
-add_executable(test main.cpp)
-target_link_libraries(test PUBLIC lips)
+add_subdirectory(util)
 
-add_executable(repl repl.cpp)
-target_link_libraries(repl PUBLIC lips)
+include(CTest)
+
+# We check if this is the main file
+# you don't usually want users of your library to
+# execute tests as part of their build
+if (${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_SOURCE_DIR})
+    add_subdirectory(test)
+endif ()
+
+enable_testing()
