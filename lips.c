@@ -72,10 +72,15 @@ static void BucketDeleteCell(Bucket* bucket, Lips_Cell cell);
 
 static void CreateStack(Lips_AllocFunc alloc, Stack* stack, uint32_t size);
 static void DestroyStack(Lips_DeallocFunc dealloc, Stack* stack);
+static void StackGrow(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
+                      Stack* stack);
 static void* StackRequire(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
                           Stack* stack, uint32_t bytes);
 // number of released bytes returned
 static uint32_t StackRelease(Stack* stack, void* data);
+static void* StackRequireFromBack(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
+                                 Stack* stack, uint32_t bytes);
+static void* StackReleaseFromBack(Stack* stack, uint32_t bytes);
 
 static EvalState* PushEvalState(Lips_Interpreter* interpreter);
 static EvalState* PopEvalState(Lips_Interpreter* interpreter);
@@ -102,8 +107,11 @@ static int IteratorIsEmpty(const Iterator* it);
 static void IteratorGet(const Iterator* it, const char** key, Lips_Cell* value);
 static void IteratorNext(Iterator* it);
 
+static uint32_t GetRealNumargs(Lips_Interpreter* interpreter, Lips_Cell callable);
 static uint32_t CheckArgumentCount(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args);
-static void DefineArguments(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell argvalues);
+static void DefineArgumentList(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell argvalues);
+static void DefineArgumentArray(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell* argvalues);
+static void FreeArgumentArray(Lips_Interpreter* interpreter, uint32_t numargs, Lips_Cell* args);
 static Lips_Cell EvalNonPair(Lips_Interpreter* interpreter, Lips_Cell cell);
 
 static Lips_Cell M_lambda(Lips_Interpreter* interpreter, Lips_Cell args, void* udata);
@@ -134,6 +142,7 @@ struct Iterator {
 struct Stack {
   uint8_t* data;
   uint32_t offset;
+  uint32_t offset_back;
   uint32_t size;
 };
 // for debug
@@ -167,6 +176,10 @@ struct Lips_Value {
       Lips_Func ptr;
       void* udata;
     } cfunc;
+    struct {
+      Lips_Macro ptr;
+      void* udata;
+    } cmacro;
   } data;
 };
 #define GET_TYPE(cell) ((cell)->type & 255)
@@ -177,6 +190,7 @@ struct Lips_Value {
 #define GET_HEAD(cell) (cell)->data.list.head
 #define GET_TAIL(cell) (cell)->data.list.tail
 #define GET_CFUNC(cell) (cell)->data.cfunc
+#define GET_CMACRO(cell) (cell)->data.cmacro
 #define GET_LFUNC(cell) (cell)->data.lfunc
 #define GET_HEAD_TYPE(cell) GET_TYPE(GET_HEAD(cell))
 #define GET_TAIL_TYPE(cell) GET_TYPE(GET_TAIL(cell))
@@ -202,11 +216,14 @@ struct Token {
 struct EvalState {
   Lips_Cell sexp;
   Lips_Cell callable;
-  Lips_Cell args;
+  union {
+    Lips_Cell* array;
+    Lips_Cell list;
+  } args;
   Lips_Cell passed_args;
   union {
     struct {
-      Lips_Cell last;
+      Lips_Cell* last;
       uint32_t count;
     } args;
     Lips_Cell code;
@@ -327,8 +344,8 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
     state->sexp = cell;
   eval:
     state->flags = 0;
-    name = GET_HEAD(state->sexp);
     state->passed_args = GET_TAIL(state->sexp);
+    name = GET_HEAD(state->sexp);
     TYPE_CHECK(interp, LIPS_TYPE_SYMBOL, name);
     state->callable = Lips_InternCell(interp, name);
     if (state->callable == NULL) {
@@ -336,8 +353,10 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
     }
     ES_ARG_COUNT(state) = CheckArgumentCount(interp, state->callable, state->passed_args);
     if (Lips_IsFunction(state->callable)) {
-      state->args = Lips_NewPair(interp, NULL, NULL);
-      ES_LAST_ARG(state) = state->args;
+      // TODO: manage variable number of arguments
+      state->args.array = StackRequireFromBack(interp->alloc, interp->dealloc, &interp->stack,
+                                               ES_ARG_COUNT(state) * sizeof(Lips_Cell));
+      ES_LAST_ARG(state) = state->args.array;
     arg:
       while (state->passed_args) {
         // eval arguments
@@ -347,28 +366,38 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
           state->sexp = argument;
           goto eval;
         } else {
-          GET_HEAD(ES_LAST_ARG(state)) = EvalNonPair(interp, argument);
+          *ES_LAST_ARG(state) = EvalNonPair(interp, argument);
+          ES_LAST_ARG(state)++;
           state->passed_args = GET_TAIL(state->passed_args);
-          if (state->passed_args) {
-            GET_TAIL(ES_LAST_ARG(state)) = Lips_NewPair(interp, NULL, NULL);
-            ES_LAST_ARG(state) = GET_TAIL(ES_LAST_ARG(state));
-          }
         }
       }
     } else {
-      state->args = state->passed_args;
+      state->args.list = state->passed_args;
     }
     if (GET_TYPE(state->callable) & ((LIPS_TYPE_C_FUNCTION^LIPS_TYPE_FUNCTION)|
                                      (LIPS_TYPE_C_MACRO^LIPS_TYPE_MACRO))) {
       // just call C function
       Lips_Cell c = state->callable;
-      ret = GET_CFUNC(c).ptr(interp, state->args, GET_CFUNC(c).udata);
+      if (Lips_IsFunction(c)) {
+        ret = GET_CFUNC(c).ptr(interp, ES_ARG_COUNT(state), state->args.array, GET_CFUNC(c).udata);
+        // array of arguments no more needed; we can free it
+        FreeArgumentArray(interp, ES_ARG_COUNT(state), state->args.array);
+      } else {
+        ret = GET_CMACRO(c).ptr(interp, state->args.list, GET_CMACRO(c).udata);
+      }
     } else {
       // push a new environment
       PushEnv(interp);
       ES_INC_NUM_ENVS(state);
-      if (ES_ARG_COUNT(state) > 0)
-        DefineArguments(interp, state->callable, state->args);
+      if (ES_ARG_COUNT(state) > 0) {
+        if (Lips_IsFunction(state->callable)) {
+          DefineArgumentArray(interp, state->callable, state->args.array);
+          // array of arguments no more needed; we can free it
+          FreeArgumentArray(interp, ES_ARG_COUNT(state), state->args.array);
+        } else {
+          DefineArgumentList(interp, state->callable, state->args.list);
+        }
+      }
       // execute code
       ES_CODE(state) = GET_LFUNC(state->callable).body;
       ES_INC_STAGE(state);
@@ -393,12 +422,9 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
     state = PopEvalState(interp);
     if (interp->evalpos != startpos) {
       if (ES_STAGE(state) == 0) {
-        GET_HEAD(ES_LAST_ARG(state)) = ret;
+        *ES_LAST_ARG(state) = ret;
+        ES_LAST_ARG(state)++;
         state->passed_args = GET_TAIL(state->passed_args);
-        if (state->passed_args) {
-          GET_TAIL(ES_LAST_ARG(state)) = Lips_NewPair(interp, NULL, NULL);
-          ES_LAST_ARG(state) = GET_TAIL(ES_LAST_ARG(state));
-        }
         goto arg;
       } else {
         ES_CODE(state) = GET_TAIL(ES_CODE(state));
@@ -554,12 +580,12 @@ Lips_NewCFunction(Lips_Interpreter* interpreter, Lips_Func function, uint8_t num
 }
 
 Lips_Cell
-Lips_NewCMacro(Lips_Interpreter* interpreter, Lips_Func function, uint8_t numargs, void* udata)
+Lips_NewCMacro(Lips_Interpreter* interpreter, Lips_Macro function, uint8_t numargs, void* udata)
 {
   Lips_Cell cell = NewCell(interpreter);
   cell->type = LIPS_TYPE_C_MACRO | (numargs << 8);
-  GET_CFUNC(cell).ptr = function;
-  GET_CFUNC(cell).udata = udata;
+  GET_CMACRO(cell).ptr = function;
+  GET_CMACRO(cell).udata = udata;
   return cell;
 }
 
@@ -860,33 +886,41 @@ Lips_Invoke(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args)
   TYPE_CHECK(interpreter, LIPS_TYPE_FUNCTION|LIPS_TYPE_MACRO, callable);
   TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, args);
   uint32_t argslen = CheckArgumentCount(interpreter, callable, args);
+  Lips_Cell* passing_args;
   // evaluate arguments
   if (Lips_IsFunction(callable)) {
-    Lips_Cell args_tail = Lips_NewPair(interpreter, NULL, NULL);
-    Lips_Cell ev_args = args_tail;
-    Lips_Cell temp = args;
-    while (temp) {
-      if (GET_HEAD(temp)) {
-        Lips_Cell value = Lips_Eval(interpreter, GET_HEAD(temp));
-        GET_HEAD(args_tail) = value;
+    passing_args = StackRequireFromBack(interpreter->alloc, interpreter->dealloc,
+                                        &interpreter->stack,
+                                        argslen * sizeof(Lips_Cell));
+    Lips_Cell* last = passing_args;
+    while (args) {
+      if (GET_HEAD(args)) {
+        *last = Lips_Eval(interpreter, GET_HEAD(args));
+        last++;
       }
-      temp = GET_TAIL(temp);
-      if (temp) {
-        GET_TAIL(args_tail) = Lips_NewPair(interpreter, NULL, NULL);
-        args_tail = GET_TAIL(args_tail);
-      }
+      args = GET_TAIL(args);
     }
-    args = ev_args;
   }
   if (GET_TYPE(callable) & ((LIPS_TYPE_C_FUNCTION^LIPS_TYPE_FUNCTION)|
                             (LIPS_TYPE_C_MACRO^LIPS_TYPE_MACRO))) {
     // just call C function
-    ret = GET_CFUNC(callable).ptr(interpreter, args, GET_CFUNC(callable).udata);
+    if (Lips_IsFunction(callable)) {
+      ret = GET_CFUNC(callable).ptr(interpreter, argslen, passing_args, GET_CFUNC(callable).udata);
+      FreeArgumentArray(interpreter, argslen, passing_args);
+    } else {
+      ret = GET_CMACRO(callable).ptr(interpreter, args, GET_CMACRO(callable).udata);
+    }
   } else {
     // push a new environment
     PushEnv(interpreter);
-    if (argslen > 0)
-      DefineArguments(interpreter, callable, args);
+    if (argslen > 0) {
+      if (Lips_IsFunction(callable)) {
+        DefineArgumentArray(interpreter, callable, passing_args);
+        FreeArgumentArray(interpreter, argslen, passing_args);
+      } else {
+        DefineArgumentList(interpreter, callable, args);
+      }
+    }
     // execute code
     Lips_Cell code = GET_LFUNC(callable).body;
     while (code) {
@@ -908,7 +942,6 @@ Lips_SetError(Lips_Interpreter* interpreter, const char* fmt, ...)
   va_start(ap, fmt);
   vsnprintf(interpreter->errbuff, sizeof(interpreter->errbuff), fmt, ap);
   va_end(ap);
-  printf("\n");
   fflush(stdout);
   return interpreter->errbuff;
 }
@@ -1358,6 +1391,7 @@ void
 CreateStack(Lips_AllocFunc alloc, Stack* stack, uint32_t size) {
   stack->data = alloc(size);
   stack->offset = 0;
+  stack->offset_back = size;
   stack->size = size;
 }
 
@@ -1369,23 +1403,26 @@ DestroyStack(Lips_DeallocFunc dealloc, Stack* stack)
   stack->size = 0;
 }
 
+void
+StackGrow(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* stack)
+{
+  uint8_t* oldata = stack->data;
+  uint32_t oldsize = stack->size;
+  // TODO: pick a better grow policy
+  stack->size = stack->size * 2;
+  stack->data = (uint8_t*)alloc(stack->size);
+  // FIXME: should we check for stack->data == NULL?
+  memcpy(stack->data, oldata, oldsize);
+  dealloc(oldata, oldsize);
+  stack->offset_back = stack->size - oldsize + stack->offset_back;
+}
+
 void*
 StackRequire(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
              Stack* stack, uint32_t bytes)
 {
-  if (stack->offset + bytes > stack->size) {
-    uint8_t* oldata = stack->data;
-    uint32_t oldsize = stack->size;
-    // TODO: pick a better grow policy
-    stack->size = stack->size * 2 + bytes;
-    stack->data = (uint8_t*)alloc(stack->size);
-    if (stack->data == NULL) {
-      stack->data = oldata;
-      stack->size = oldsize;
-      return NULL;
-    }
-    memcpy(stack->data, oldata, oldsize);
-    dealloc(oldata, oldsize);
+  if (stack->offset + stack->size - stack->offset_back + bytes > stack->size) {
+    StackGrow(alloc, dealloc, stack);
   }
   void* ret = (void*)(stack->data + stack->offset);
   stack->offset += bytes;
@@ -1399,6 +1436,25 @@ StackRelease(Stack* stack, void* data)
   uint32_t bytes = (stack->data + stack->offset) - (uint8_t*)data;
   stack->offset -= bytes;
   return bytes;
+}
+
+void*
+StackRequireFromBack(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* stack, uint32_t bytes)
+{;
+  if (stack->offset + stack->size - stack->offset_back + bytes > stack->size) {
+    StackGrow(alloc, dealloc, stack);
+  }
+  stack->offset_back -= bytes;
+  return stack->data + stack->offset_back;
+}
+
+void*
+StackReleaseFromBack(Stack* stack, uint32_t bytes)
+{
+  assert(stack->offset_back + bytes <= stack->size);
+  void* ptr = stack->data + stack->offset_back;
+  stack->offset_back += bytes;
+  return ptr;
 }
 
 EvalState*
@@ -1613,6 +1669,12 @@ IteratorNext(Iterator* it) {
   it->size--;
 }
 
+uint32_t GetRealNumargs(Lips_Interpreter* interpreter, Lips_Cell callable)
+{
+  TYPE_CHECK(interpreter, LIPS_TYPE_FUNCTION|LIPS_TYPE_MACRO, callable);
+  return (GET_NUMARGS(callable) & 127) + (GET_NUMARGS(callable) >> 7);
+}
+
 uint32_t
 CheckArgumentCount(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args)
 {
@@ -1629,15 +1691,14 @@ CheckArgumentCount(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell 
 }
 
 void
-DefineArguments(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell argvalues)
+DefineArgumentList(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell argvalues)
 {
   TYPE_CHECK(interpreter, LIPS_TYPE_FUNCTION|LIPS_TYPE_MACRO, callable);
   TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, argvalues);
   // reserve space for hash table
-  uint32_t sz = (GET_NUMARGS(callable) & 127) + (GET_NUMARGS(callable) >> 7);
   HashTableReserve(interpreter->alloc, interpreter->dealloc,
                    &interpreter->stack, InterpreterEnv(interpreter),
-                   sz);
+                   GetRealNumargs(interpreter, callable));
   // define variables in a new environment
   Lips_Cell argnames = callable->data.lfunc.args;
   while (argnames) {
@@ -1647,6 +1708,32 @@ DefineArguments(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell arg
     argnames = GET_TAIL(argnames);
     argvalues = GET_TAIL(argvalues);
   }
+}
+
+void
+DefineArgumentArray(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell* argvalues)
+{
+  // TODO: manage variadics
+  TYPE_CHECK(interpreter, LIPS_TYPE_FUNCTION|LIPS_TYPE_MACRO, callable);
+  // reserve space for hash table
+  HashTableReserve(interpreter->alloc, interpreter->dealloc,
+                   &interpreter->stack, InterpreterEnv(interpreter),
+                   GetRealNumargs(interpreter, callable));
+  // define variables in a new environment
+  Lips_Cell argnames = callable->data.lfunc.args;
+  while (argnames) {
+    if (GET_HEAD(argnames)) {
+      Lips_DefineCell(interpreter, GET_HEAD(argnames), *argvalues);
+    }
+    argnames = GET_TAIL(argnames);
+    argvalues++;
+  }
+}
+
+void
+FreeArgumentArray(Lips_Interpreter* interpreter, uint32_t numargs, Lips_Cell* args)
+{
+  assert(StackReleaseFromBack(&interpreter->stack, numargs * sizeof(Lips_Cell)) == args);
 }
 
 Lips_Cell

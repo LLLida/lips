@@ -44,7 +44,8 @@ typedef struct Lips_Value Lips_Value;
 
 typedef Lips_Value* Lips_Cell;
 
-typedef Lips_Cell(*Lips_Func)(Lips_Interpreter* interp, Lips_Cell args, void* udata);
+typedef Lips_Cell(*Lips_Macro)(Lips_Interpreter* interp, Lips_Cell args, void* udata);
+typedef Lips_Cell(*Lips_Func)(Lips_Interpreter* interp, uint32_t numargs, Lips_Cell* args, void* udata);
 
 enum {
   // 64-bit integer
@@ -135,7 +136,7 @@ Lips_Cell Lips_NewList(Lips_Interpreter* interpreter, uint32_t numCells, Lips_Ce
 Lips_Cell Lips_NewFunction(Lips_Interpreter* interpreter, Lips_Cell args, Lips_Cell body, uint8_t numargs);
 Lips_Cell Lips_NewMacro(Lips_Interpreter* interpreter, Lips_Cell args, Lips_Cell body, uint8_t numargs);
 Lips_Cell Lips_NewCFunction(Lips_Interpreter* interpreter, Lips_Func function, uint8_t numargs, void* udata);
-Lips_Cell Lips_NewCMacro(Lips_Interpreter* interpreter, Lips_Func function, uint8_t numargs, void* udata);
+Lips_Cell Lips_NewCMacro(Lips_Interpreter* interpreter, Lips_Macro function, uint8_t numargs, void* udata);
 uint32_t Lips_GetType(const Lips_Cell cell) LIPS_PURE_FUNCTION;
 int64_t Lips_GetInteger(Lips_Interpreter* interpreter, Lips_Cell cell);
 double Lips_GetReal(Lips_Interpreter* interpreter, Lips_Cell cell);

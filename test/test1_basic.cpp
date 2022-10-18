@@ -4,19 +4,22 @@
 Lips_Interpreter* interp;
 #define ARRAY_SIZE(arr) sizeof(arr) / sizeof(arr[0])
 
-Lips_Cell my_function(Lips_Interpreter* interp, Lips_Cell args, void* udata) {
+Lips_Cell my_function(Lips_Interpreter* interp, uint32_t numargs, Lips_Cell* args, void* udata) {
   char buff[128];
-  Lips_PrintCell(interp, args, buff, sizeof(buff));
+  int n = 0;
+  n += Lips_PrintCell(interp, args[0], buff+n, sizeof(buff)-n);
+  n += Lips_PrintCell(interp, args[1], buff+n, sizeof(buff)-n);
+  n += Lips_PrintCell(interp, args[2], buff+n, sizeof(buff)-n);
   printf("my_function: interp=%p udata=%p args=%s\n", interp, udata, buff);
-  return args;
+  return Lips_NewList(interp, 3, args);
 }
 
-Lips_Cell F_printf(Lips_Interpreter* interp, Lips_Cell args, void* udata) {
+Lips_Cell F_printf(Lips_Interpreter* interp, uint32_t numargs, Lips_Cell* args, void* udata) {
   static char buffer[1024];
-  int n = Lips_PrintCell(interp, args, buffer, sizeof(buffer));
-  printf("Printf: %s\n", buffer);
+  Lips_Cell list = Lips_NewList(interp, numargs, args);
+  uint32_t n = Lips_PrintCell(interp, list, buffer, sizeof(buffer));
+  printf("Printf: (numargs=%u) %s\n", numargs, buffer);
   return Lips_NewStringN(interp, buffer, n);
-  // return args;
 }
 
 int main(int argc, char** argv) {
