@@ -12,7 +12,7 @@ int main(int argc, char** argv) {
   while (true) {
     printf(">>> ");
     fgets(buff, sizeof(buff), stdin);
-    if (strncmp(buff, "quit", 4) == 0) {
+    if (strncmp(buff, "quit", strlen(buff)-1) == 0) {
       break;
     }
     eval = Lips_EvalString(interp, buff, NULL);
