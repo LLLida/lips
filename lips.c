@@ -176,6 +176,8 @@ struct Lips_Value {
 #define GET_STRING(cell) (cell)->data.str->ptr
 #define GET_HEAD(cell) (cell)->data.list.head
 #define GET_TAIL(cell) (cell)->data.list.tail
+#define GET_CFUNC(cell) (cell)->data.cfunc
+#define GET_LFUNC(cell) (cell)->data.lfunc
 #define GET_HEAD_TYPE(cell) GET_TYPE(GET_HEAD(cell))
 #define GET_TAIL_TYPE(cell) GET_TYPE(GET_TAIL(cell))
 
@@ -360,7 +362,7 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
                                      (LIPS_TYPE_C_MACRO^LIPS_TYPE_MACRO))) {
       // just call C function
       Lips_Cell c = state->callable;
-      ret = c->data.cfunc.ptr(interp, state->args, c->data.cfunc.udata);
+      ret = GET_CFUNC(c).ptr(interp, state->args, GET_CFUNC(c).udata);
     } else {
       // push a new environment
       PushEnv(interp);
@@ -368,7 +370,7 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
       if (ES_ARG_COUNT(state) > 0)
         DefineArguments(interp, state->callable, state->args);
       // execute code
-      ES_CODE(state) = state->callable->data.lfunc.body;
+      ES_CODE(state) = GET_LFUNC(state->callable).body;
       ES_INC_STAGE(state);
     code:
       while (ES_CODE(state)) {
@@ -526,8 +528,8 @@ Lips_NewFunction(Lips_Interpreter* interpreter, Lips_Cell args, Lips_Cell body, 
   Lips_Cell cell = NewCell(interpreter);
   cell->type = LIPS_TYPE_FUNCTION | (numargs << 8);
   // TODO: check all arguments are symbols
-  cell->data.lfunc.args = args;
-  cell->data.lfunc.body = body;
+  GET_LFUNC(cell).args = args;
+  GET_LFUNC(cell).body = body;
   return cell;
 }
 
@@ -536,8 +538,8 @@ Lips_NewMacro(Lips_Interpreter* interpreter, Lips_Cell args, Lips_Cell body, uin
 {
   Lips_Cell cell = NewCell(interpreter);
   cell->type = LIPS_TYPE_MACRO | (numargs << 8);
-  cell->data.lfunc.args = args;
-  cell->data.lfunc.body = body;
+  GET_LFUNC(cell).args = args;
+  GET_LFUNC(cell).body = body;
   return cell;
 }
 
@@ -546,8 +548,8 @@ Lips_NewCFunction(Lips_Interpreter* interpreter, Lips_Func function, uint8_t num
 {
   Lips_Cell cell = NewCell(interpreter);
   cell->type = LIPS_TYPE_C_FUNCTION | (numargs << 8);
-  cell->data.cfunc.ptr = function;
-  cell->data.cfunc.udata = udata;
+  GET_CFUNC(cell).ptr = function;
+  GET_CFUNC(cell).udata = udata;
   return cell;
 }
 
@@ -556,8 +558,8 @@ Lips_NewCMacro(Lips_Interpreter* interpreter, Lips_Func function, uint8_t numarg
 {
   Lips_Cell cell = NewCell(interpreter);
   cell->type = LIPS_TYPE_C_MACRO | (numargs << 8);
-  cell->data.cfunc.ptr = function;
-  cell->data.cfunc.udata = udata;
+  GET_CFUNC(cell).ptr = function;
+  GET_CFUNC(cell).udata = udata;
   return cell;
 }
 
@@ -879,14 +881,14 @@ Lips_Invoke(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args)
   if (GET_TYPE(callable) & ((LIPS_TYPE_C_FUNCTION^LIPS_TYPE_FUNCTION)|
                             (LIPS_TYPE_C_MACRO^LIPS_TYPE_MACRO))) {
     // just call C function
-    ret = callable->data.cfunc.ptr(interpreter, args, callable->data.cfunc.udata);
+    ret = GET_CFUNC(callable).ptr(interpreter, args, GET_CFUNC(callable).udata);
   } else {
     // push a new environment
     PushEnv(interpreter);
     if (argslen > 0)
       DefineArguments(interpreter, callable, args);
     // execute code
-    Lips_Cell code = callable->data.lfunc.body;
+    Lips_Cell code = GET_LFUNC(callable).body;
     while (code) {
       if (GET_HEAD(code)) {
         ret = Lips_Eval(interpreter, GET_HEAD(code));

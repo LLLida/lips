@@ -26,6 +26,8 @@ extern "C" {
   #define LIPS_HOT_FUNCTION __attribute__((hot))
   #define LIPS_COLD_FUNCTION __attribute__((cold))
   #define LIPS_DEPRECATED_FUNCTION __attribute__((deprecated))
+#define LIPS_LIKELY(x) __builtin_expect(x,1)
+#define LIPS_UNLIKELY(x) __builtin_expect(x,0)
 #else
   #define LIPS_PURE_FUNCTION
   #define LIPS_HOT_FUNCTION
