@@ -58,6 +58,7 @@ static void StringAllocate(StringData* str, Lips_AllocFunc alloc, const char* pt
 static void StringDestroy(StringData* str, Lips_DeallocFunc dealloc);
 static void StringSet(Lips_AllocFunc alloc, StringData* str, uint32_t index, char c);
 static StringData* StringCopy(StringData* src);
+static int StringEqual(const StringData* lhs, const StringData* rhs);
 
 static void ParserInit(Parser* parser, const char* str, uint32_t len);
 static int ParserNextToken(Parser* parser);
@@ -114,8 +115,21 @@ static void DefineArgumentArray(Lips_Interpreter* interpreter, Lips_Cell callabl
 static void FreeArgumentArray(Lips_Interpreter* interpreter, uint32_t numargs, Lips_Cell* args);
 static Lips_Cell EvalNonPair(Lips_Interpreter* interpreter, Lips_Cell cell);
 
-static Lips_Cell M_lambda(Lips_Interpreter* interpreter, Lips_Cell args, void* udata);
-static Lips_Cell M_macro(Lips_Interpreter* interpreter, Lips_Cell args, void* udata);
+static LIPS_DECLARE_FUNCTION(list);
+static LIPS_DECLARE_FUNCTION(car);
+static LIPS_DECLARE_FUNCTION(cdr);
+static LIPS_DECLARE_FUNCTION(equal);
+static LIPS_DECLARE_FUNCTION(nilp);
+
+static LIPS_DECLARE_MACRO(lambda);
+static LIPS_DECLARE_MACRO(macro);
+static LIPS_DECLARE_MACRO(define);
+static LIPS_DECLARE_MACRO(quote);
+static LIPS_DECLARE_MACRO(progn);
+static LIPS_DECLARE_MACRO(if);
+static LIPS_DECLARE_MACRO(when);
+// TODO: implement cond
+/* static LIPS_DECLARE_MACRO(cond); */
 
 /// STRUCTS
 
@@ -261,6 +275,7 @@ struct Lips_Interpreter {
   uint32_t evalpos;
   jmp_buf jmp; // this is used for exceptions
   Lips_Cell S_nil;
+  Lips_Cell S_t;
   Lips_Cell S_filename;
   char errbuff[1024];
 };
@@ -284,10 +299,28 @@ Lips_CreateInterpreter(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc)
   interp->envpos = ((uint8_t*)env - interp->stack.data);
   interp->evalpos = STACK_INVALID_POS;
   // define builtins
-  interp->S_nil = Lips_NewPair(interp, NULL, NULL);
+  /* interp->S_nil = Lips_NewPair(interp, NULL, NULL); */
+  interp->S_nil = Lips_Define(interp, "nil", Lips_NewPair(interp, NULL, NULL));
+  /* interp->S_t = Lips_NewInteger(interp, 1); */
+  interp->S_t = Lips_Define(interp, "t", Lips_NewInteger(interp, 1));
   interp->S_filename = Lips_NewPair(interp, NULL, NULL);
-  Lips_Define(interp, "lambda", Lips_NewCMacro(interp, M_lambda, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL));
-  Lips_Define(interp, "macro", Lips_NewCMacro(interp, M_macro, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL));
+
+  LIPS_DEFINE_FUNCTION(interp, list, LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_FUNCTION(interp, car, LIPS_NUM_ARGS_1, NULL);
+  LIPS_DEFINE_FUNCTION(interp, cdr, LIPS_NUM_ARGS_1, NULL);
+  Lips_Cell S_equal = LIPS_DEFINE_FUNCTION(interp, equal, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
+  Lips_Define(interp, "=", S_equal);
+  Lips_Cell S_nilp = LIPS_DEFINE_FUNCTION(interp, nilp, LIPS_NUM_ARGS_1, NULL);
+  Lips_Define(interp, "not", S_nilp);
+
+  LIPS_DEFINE_MACRO(interp, lambda, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_MACRO(interp, macro, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_MACRO(interp, define, LIPS_NUM_ARGS_2, NULL);
+  LIPS_DEFINE_MACRO(interp, quote, LIPS_NUM_ARGS_1, NULL);
+  LIPS_DEFINE_MACRO(interp, progn, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_MACRO(interp, if, LIPS_NUM_ARGS_3|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_MACRO(interp, when, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
+
   return interp;
 }
 
@@ -1076,6 +1109,17 @@ StringCopy(StringData* src)
   return src;
 }
 
+int StringEqual(const StringData* lhs, const StringData* rhs)
+{
+  if (lhs->hash == rhs->hash) {
+    if (lhs->length == rhs->length) {
+      if (strcmp(lhs->ptr, rhs->ptr) == 0)
+        return 1;
+    }
+  }
+  return 0;
+}
+
 void
 ParserInit(Parser* parser, const char* str, uint32_t len)
 {
@@ -1755,8 +1799,110 @@ EvalNonPair(Lips_Interpreter* interpreter, Lips_Cell cell)
   assert(0 && "internal error: cell has undefined type");
 }
 
-Lips_Cell
-M_lambda(Lips_Interpreter* interpreter, Lips_Cell args, void* udata)
+
+/// Lisp functions
+
+LIPS_DECLARE_FUNCTION(list)
+{
+  (void)udata;
+  return Lips_NewList(interpreter, numargs, args);
+}
+
+LIPS_DECLARE_FUNCTION(car)
+{
+  (void)udata;
+  assert(numargs == 1);
+  Lips_Cell list = args[0];
+  return Lips_CAR(interpreter, list);
+}
+
+LIPS_DECLARE_FUNCTION(cdr)
+{
+  (void)udata;
+  assert(numargs == 1);
+  Lips_Cell list = args[0];
+  return Lips_CDR(interpreter, list);
+}
+
+LIPS_DECLARE_FUNCTION(equal)
+{
+  (void)udata;
+  Lips_Cell lhs = args[0];
+  Lips_Cell rhs;
+  for (uint32_t i = 1; i < numargs; i++) {
+    rhs = args[i];
+    if (lhs == rhs)
+      continue;
+    // TODO: compare ints and floats
+    if (GET_TYPE(lhs) == GET_TYPE(rhs)) {
+      if (GET_TYPE(lhs) == LIPS_TYPE_INTEGER) {
+        if (lhs->data.integer == rhs->data.integer)
+          continue;
+      } else if (GET_TYPE(lhs) == LIPS_TYPE_REAL) {
+        if (lhs->data.real == rhs->data.real)
+          continue;
+      } else if (GET_TYPE(lhs) == LIPS_TYPE_STRING ||
+                 GET_TYPE(lhs) == LIPS_TYPE_SYMBOL) {
+        if (StringEqual(GET_STR(lhs), GET_STR(rhs)))
+          continue;
+      } else if (GET_TYPE(lhs) == LIPS_TYPE_PAIR) {
+        // FIXME: this should definitely look nicer but for now it works
+        // or does it?
+        if ((GET_HEAD(lhs) == NULL && GET_HEAD(rhs)) ||
+            (GET_HEAD(lhs) && GET_HEAD(rhs) == NULL)) {
+          return interpreter->S_nil;
+        }
+        int equals = 0;
+        if (GET_HEAD(lhs) && GET_HEAD(rhs)) {
+          Lips_Cell cells[2] = { GET_HEAD(lhs), GET_HEAD(rhs) };
+          equals = F_equal(interpreter, 2, cells, NULL) != interpreter->S_nil;
+        } else {
+          equals = 1;
+        }
+        if (equals) {
+          if ((GET_TAIL(lhs) == NULL && GET_TAIL(rhs)) ||
+              (GET_TAIL(lhs) && GET_TAIL(rhs) == NULL)) {
+            return interpreter->S_nil;
+          }
+          if (GET_TAIL(lhs) == NULL && GET_TAIL(rhs) == NULL)
+            continue;
+          Lips_Cell cells[2] = { GET_TAIL(lhs), GET_TAIL(rhs) };
+          if (F_equal(interpreter, 2, cells, NULL) != interpreter->S_nil)
+            continue;
+        }
+      } else if (GET_TYPE(lhs) == LIPS_TYPE_FUNCTION ||
+                 GET_TYPE(rhs) == LIPS_TYPE_MACRO) {
+        Lips_Cell cells1[2] = { GET_LFUNC(lhs).args, GET_LFUNC(rhs).args };
+        Lips_Cell cells2[2] = { GET_LFUNC(lhs).body, GET_LFUNC(rhs).body };
+        if (F_equal(interpreter, 2, cells1, NULL) != interpreter->S_nil &&
+            F_equal(interpreter, 2, cells2, NULL) != interpreter->S_nil)
+          continue;
+      } else if (GET_TYPE(lhs) == LIPS_TYPE_C_FUNCTION) {
+        if (GET_CFUNC(lhs).ptr == GET_CFUNC(rhs).ptr &&
+            GET_CFUNC(lhs).udata == GET_CFUNC(rhs).udata)
+          continue;
+      } else if (GET_TYPE(lhs) == LIPS_TYPE_C_MACRO) {
+        if (GET_CMACRO(lhs).ptr == GET_CMACRO(rhs).ptr &&
+            GET_CMACRO(lhs).udata == GET_CMACRO(rhs).udata)
+          continue;
+      } else {
+        assert(0);
+      }
+    }
+    return interpreter->S_nil;
+  }
+  return interpreter->S_t;
+}
+
+LIPS_DECLARE_FUNCTION(nilp)
+{
+  (void)udata;
+  assert(numargs == 1);
+  Lips_Cell cells[2] = { args[0], interpreter->S_nil };
+  return F_equal(interpreter, 2, cells, NULL);
+}
+
+LIPS_DECLARE_MACRO(lambda)
 {
   TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, GET_HEAD(args));
   (void)udata;
@@ -1773,7 +1919,7 @@ M_lambda(Lips_Interpreter* interpreter, Lips_Cell args, void* udata)
   return lambda;
 }
 
-Lips_Cell M_macro(Lips_Interpreter* interpreter, Lips_Cell args, void* udata)
+LIPS_DECLARE_MACRO(macro)
 {
   TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, GET_HEAD(args));
   (void)udata;
@@ -1788,4 +1934,50 @@ Lips_Cell M_macro(Lips_Interpreter* interpreter, Lips_Cell args, void* udata)
   }
   Lips_Cell macro = Lips_NewMacro(interpreter, GET_HEAD(args), GET_TAIL(args), len);
   return macro;
+}
+
+LIPS_DECLARE_MACRO(define)
+{
+  (void)udata;
+  Lips_Cell value = Lips_Eval(interpreter, GET_HEAD(GET_TAIL(args)));
+  // TODO: handle error
+  return Lips_DefineCell(interpreter, GET_HEAD(args), value);
+}
+
+LIPS_DECLARE_MACRO(quote)
+{
+  (void)udata;
+  (void)interpreter;
+  return args;
+}
+
+LIPS_DECLARE_MACRO(progn)
+{
+  (void)udata;
+  Lips_Cell ret = NULL;
+  while (args != NULL) {
+    ret = Lips_Eval(interpreter, GET_HEAD(args));
+    args = GET_TAIL(args);
+  }
+  return ret;
+}
+
+LIPS_DECLARE_MACRO(if)
+{
+  (void)udata;
+  Lips_Cell condition = Lips_Eval(interpreter, GET_HEAD(args));
+  if (F_nilp(interpreter, 1, &condition, NULL) == interpreter->S_nil) {
+    return Lips_Eval(interpreter, GET_HEAD(GET_TAIL(args)));
+  }
+  return M_progn(interpreter, GET_TAIL(GET_TAIL(args)), NULL);
+}
+
+LIPS_DECLARE_MACRO(when)
+{
+  (void)udata;
+  Lips_Cell condition = Lips_Eval(interpreter, GET_HEAD(args));
+  if (F_nilp(interpreter, 1, &condition, NULL) == interpreter->S_nil) {
+    return M_progn(interpreter, GET_TAIL(args), NULL);
+  }
+  return interpreter->S_nil;
 }

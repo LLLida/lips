@@ -46,6 +46,10 @@ typedef Lips_Value* Lips_Cell;
 
 typedef Lips_Cell(*Lips_Macro)(Lips_Interpreter* interp, Lips_Cell args, void* udata);
 typedef Lips_Cell(*Lips_Func)(Lips_Interpreter* interp, uint32_t numargs, Lips_Cell* args, void* udata);
+#define LIPS_DECLARE_MACRO(name) Lips_Cell M_##name (Lips_Interpreter* interpreter, Lips_Cell args, void* udata)
+#define LIPS_DECLARE_FUNCTION(name) Lips_Cell F_##name (Lips_Interpreter* interpreter, uint32_t numargs, Lips_Cell* args, void* udata)
+#define LIPS_DEFINE_MACRO(interp, name, numargs, udata) Lips_Define(interp, #name, Lips_NewCMacro(interp, M_##name, numargs, udata));
+#define LIPS_DEFINE_FUNCTION(interp, name, numargs, udata) Lips_Define(interp, #name, Lips_NewCFunction(interp, F_##name, numargs, udata));
 
 enum {
   // 64-bit integer
