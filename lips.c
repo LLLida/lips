@@ -1144,6 +1144,7 @@ ParserInit(Parser* parser, const char* str, uint32_t len)
   }
   if (parenBalance != 0) {
     // TODO: log an error
+    assert(0);
   }
 }
 
@@ -1947,7 +1948,7 @@ LIPS_DECLARE_MACRO(quote)
 {
   (void)udata;
   (void)interpreter;
-  return args;
+  return GET_HEAD(args);
 }
 
 LIPS_DECLARE_MACRO(progn)
