@@ -26,3 +26,5 @@ Use mark-and-sweep algorithm.
  3. general functions(===, =nilp=, =typeof= etc.)
  4. environment functions(=eval=, =intern= etc.)
  5. string functions(=format=, =concat=, =capitalize= etc.)
+
+** Docstrings
