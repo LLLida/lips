@@ -155,8 +155,8 @@ struct Iterator {
 
 struct Stack {
   uint8_t* data;
-  uint32_t offset;
-  uint32_t offset_back;
+  uint32_t left;
+  uint32_t right;
   uint32_t size;
 };
 // for debug
@@ -299,9 +299,7 @@ Lips_CreateInterpreter(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc)
   interp->envpos = ((uint8_t*)env - interp->stack.data);
   interp->evalpos = STACK_INVALID_POS;
   // define builtins
-  /* interp->S_nil = Lips_NewPair(interp, NULL, NULL); */
   interp->S_nil = Lips_Define(interp, "nil", Lips_NewPair(interp, NULL, NULL));
-  /* interp->S_t = Lips_NewInteger(interp, 1); */
   interp->S_t = Lips_Define(interp, "t", Lips_NewInteger(interp, 1));
   interp->S_filename = Lips_NewPair(interp, NULL, NULL);
 
@@ -1109,7 +1107,8 @@ StringCopy(StringData* src)
   return src;
 }
 
-int StringEqual(const StringData* lhs, const StringData* rhs)
+int
+StringEqual(const StringData* lhs, const StringData* rhs)
 {
   if (lhs->hash == rhs->hash) {
     if (lhs->length == rhs->length) {
@@ -1434,8 +1433,8 @@ BucketDeleteCell(Bucket* bucket, Lips_Cell cell)
 void
 CreateStack(Lips_AllocFunc alloc, Stack* stack, uint32_t size) {
   stack->data = alloc(size);
-  stack->offset = 0;
-  stack->offset_back = size;
+  stack->left = 0;
+  stack->right = size;
   stack->size = size;
 }
 
@@ -1458,46 +1457,46 @@ StackGrow(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* stack)
   // FIXME: should we check for stack->data == NULL?
   memcpy(stack->data, oldata, oldsize);
   dealloc(oldata, oldsize);
-  stack->offset_back = stack->size - oldsize + stack->offset_back;
+  stack->right = stack->size - oldsize + stack->right;
 }
 
 void*
 StackRequire(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
              Stack* stack, uint32_t bytes)
 {
-  if (stack->offset + stack->size - stack->offset_back + bytes > stack->size) {
+  if (stack->left + stack->size - stack->right + bytes > stack->size) {
     StackGrow(alloc, dealloc, stack);
   }
-  void* ret = (void*)(stack->data + stack->offset);
-  stack->offset += bytes;
+  void* ret = (void*)(stack->data + stack->left);
+  stack->left += bytes;
   return ret;
 }
 
 uint32_t
 StackRelease(Stack* stack, void* data)
 {
-  assert((uint8_t*)data >= stack->data && (uint8_t*)data <= stack->data + stack->offset);
-  uint32_t bytes = (stack->data + stack->offset) - (uint8_t*)data;
-  stack->offset -= bytes;
+  assert((uint8_t*)data >= stack->data && (uint8_t*)data <= stack->data + stack->left);
+  uint32_t bytes = (stack->data + stack->left) - (uint8_t*)data;
+  stack->left -= bytes;
   return bytes;
 }
 
 void*
 StackRequireFromBack(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* stack, uint32_t bytes)
 {;
-  if (stack->offset + stack->size - stack->offset_back + bytes > stack->size) {
+  if (stack->left + stack->size - stack->right + bytes > stack->size) {
     StackGrow(alloc, dealloc, stack);
   }
-  stack->offset_back -= bytes;
-  return stack->data + stack->offset_back;
+  stack->right -= bytes;
+  return stack->data + stack->right;
 }
 
 void*
 StackReleaseFromBack(Stack* stack, uint32_t bytes)
 {
-  assert(stack->offset_back + bytes <= stack->size);
-  void* ptr = stack->data + stack->offset_back;
-  stack->offset_back += bytes;
+  assert(stack->right + bytes <= stack->size);
+  void* ptr = stack->data + stack->right;
+  stack->right += bytes;
   return ptr;
 }
 
