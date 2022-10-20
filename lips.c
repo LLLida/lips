@@ -108,7 +108,7 @@ static int IteratorIsEmpty(const Iterator* it);
 static void IteratorGet(const Iterator* it, const char** key, Lips_Cell* value);
 static void IteratorNext(Iterator* it);
 
-static uint32_t GetRealNumargs(Lips_Interpreter* interpreter, Lips_Cell callable);
+static void DefineWithCurrent(Lips_Interpreter* interpreter, Lips_Cell name, Lips_Cell value);
 static uint32_t CheckArgumentCount(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args);
 static void DefineArgumentList(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell argvalues);
 static void DefineArgumentArray(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell* argvalues);
@@ -143,10 +143,13 @@ struct StringData {
 
 struct HashTable {
   uint32_t allocated;
-  uint32_t size;
+  uint32_t flags;
   uint32_t parent;
 };
-#define LIPS_HASH_TABLE_DATA(ht) (Node*)((HashTable*)ht+1)
+#define HASH_TABLE_DATA(ht) (Node*)((HashTable*)ht+1)
+#define HASH_TABLE_CONSTANT_FLAG (1<<31)
+#define HASH_TABLE_GET_SIZE(ht) ((ht)->flags & ~HASH_TABLE_CONSTANT_FLAG)
+#define HASH_TABLE_SET_SIZE(ht, sz) (ht)->flags = ((ht)->flags & HASH_TABLE_CONSTANT_FLAG) | (sz)
 
 struct Iterator {
   Node* node;
@@ -420,7 +423,7 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
       }
     } else {
       // push a new environment
-      PushEnv(interp);
+      HashTable* env = PushEnv(interp);
       ES_INC_NUM_ENVS(state);
       if (ES_ARG_COUNT(state) > 0) {
         if (Lips_IsFunction(state->callable)) {
@@ -430,6 +433,9 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
         } else {
           DefineArgumentList(interp, state->callable, state->args.list);
         }
+      }
+      if (Lips_IsMacro(state->callable)) {
+        env->flags |= HASH_TABLE_CONSTANT_FLAG;
       }
       // execute code
       ES_CODE(state) = GET_LFUNC(state->callable).body;
@@ -857,6 +863,9 @@ Lips_Define(Lips_Interpreter* interpreter, const char* name, Lips_Cell cell)
 {
   assert(cell);
   HashTable* env = InterpreterEnv(interpreter);
+  while (env->flags & HASH_TABLE_CONSTANT_FLAG) {
+    env = EnvParent(interpreter, env);
+  }
   Lips_Cell* ptr = HashTableInsert(interpreter->alloc, interpreter->dealloc,
                                    &interpreter->stack, env,
                                    name, cell);
@@ -873,6 +882,9 @@ Lips_DefineCell(Lips_Interpreter* interpreter, Lips_Cell cell, Lips_Cell value)
   TYPE_CHECK(interpreter, LIPS_TYPE_SYMBOL|LIPS_TYPE_STRING, cell);
   assert(value);
   HashTable* env = InterpreterEnv(interpreter);
+  while (env->flags & HASH_TABLE_CONSTANT_FLAG) {
+    env = EnvParent(interpreter, env);
+  }
   Lips_Cell* ptr = HashTableInsertWithHash(interpreter->alloc, interpreter->dealloc,
                                            &interpreter->stack, env,
                                            GET_STR(cell)->hash, GET_STR(cell)->ptr, value);
@@ -947,12 +959,13 @@ Lips_Invoke(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args)
     }
   } else {
     // push a new environment
-    PushEnv(interpreter);
+    HashTable* env = PushEnv(interpreter);
     if (argslen > 0) {
       if (Lips_IsFunction(callable)) {
         DefineArgumentArray(interpreter, callable, passing_args);
         FreeArgumentArray(interpreter, argslen, passing_args);
       } else {
+        env->flags |= HASH_TABLE_CONSTANT_FLAG;
         DefineArgumentList(interpreter, callable, args);
       }
     }
@@ -1595,27 +1608,27 @@ HashTableReserve(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
                  Stack* stack, HashTable* ht, uint32_t capacity)
 {
   assert(capacity > ht->allocated);
-  if (ht->size == 0) {
-    assert(StackRelease(stack, LIPS_HASH_TABLE_DATA(ht)) == ht->allocated * sizeof(Node));
+  if (HASH_TABLE_GET_SIZE(ht) == 0) {
+    assert(StackRelease(stack, HASH_TABLE_DATA(ht)) == ht->allocated * sizeof(Node));
   }
   uint32_t preallocated = ht->allocated;
   ht->allocated = capacity;
   Node* nodes = StackRequire(alloc, dealloc, stack, capacity * sizeof(Node));
   nodes += capacity - preallocated;
-  Node* data = LIPS_HASH_TABLE_DATA(ht);
+  Node* data = HASH_TABLE_DATA(ht);
   memcpy(nodes, data, preallocated * sizeof(Node));
   for (uint32_t i = 0; i < capacity; i++) {
     data[i].value = NULL;
   }
-  if (ht->size > 0) {
-    uint32_t oldSize = ht->size;
-    ht->size = 0;
+  if (HASH_TABLE_GET_SIZE(ht) > 0) {
+    uint32_t oldSize = HASH_TABLE_GET_SIZE(ht);
+    HASH_TABLE_SET_SIZE(ht, 0);
     for (uint32_t i = 0; i < preallocated; i++) {
       if (LIPS_NODE_VALID(nodes[i])) {
         HashTableInsertWithHash(alloc, dealloc, stack,
                                 ht, nodes[i].hash,
                                 nodes[i].key, nodes[i].value);
-        if (ht->size == oldSize) break;
+        if (HASH_TABLE_GET_SIZE(ht) == oldSize) break;
       }
     }
     assert(StackRelease(stack, data + capacity) == preallocated * sizeof(Node));
@@ -1634,11 +1647,11 @@ HashTableInsertWithHash(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* s
                         HashTable* ht, uint32_t hash,
                         const char* key, Lips_Cell value) {
   assert(value && "Can not insert null");
-  if (ht->size == ht->allocated) {
-    uint32_t sz = (ht->size == 0) ? 1 : (ht->size<<1);
+  if (HASH_TABLE_GET_SIZE(ht) == ht->allocated) {
+    uint32_t sz = (HASH_TABLE_GET_SIZE(ht) == 0) ? 1 : (HASH_TABLE_GET_SIZE(ht)<<1);
     HashTableReserve(alloc, dealloc, stack, ht, sz);
   }
-  Node* data = LIPS_HASH_TABLE_DATA(ht);
+  Node* data = HASH_TABLE_DATA(ht);
   uint32_t id = hash % ht->allocated;
   while (LIPS_NODE_VALID(data[id])) {
     // Hash table already has this element
@@ -1651,7 +1664,7 @@ HashTableInsertWithHash(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* s
   data[id].key = key;
   data[id].value = value;
   // increment the size counter
-  ht->size++;
+  HASH_TABLE_SET_SIZE(ht, HASH_TABLE_GET_SIZE(ht)+1);
   return &data[id].value;
 }
 
@@ -1665,10 +1678,10 @@ HashTableSearch(const HashTable* ht, const char* key)
 Lips_Cell*
 HashTableSearchWithHash(const HashTable* ht, uint32_t hash, const char* key)
 {
-  Node* data = LIPS_HASH_TABLE_DATA(ht);
+  Node* data = HASH_TABLE_DATA(ht);
   uint32_t i = 0;
   uint32_t id = hash;
-  while (i < ht->size) {
+  while (i < HASH_TABLE_GET_SIZE(ht)) {
     id = id % ht->allocated;
     if (LIPS_NODE_VALID(data[id])) {
       if (strcmp(data[id].key, key) == 0)
@@ -1685,8 +1698,8 @@ HashTableSearchWithHash(const HashTable* ht, uint32_t hash, const char* key)
 
 void
 HashTableIterate(HashTable* ht, Iterator* it) {
-  it->node = LIPS_HASH_TABLE_DATA(ht);
-  it->size = ht->size;
+  it->node = HASH_TABLE_DATA(ht);
+  it->size = HASH_TABLE_GET_SIZE(ht);
   if (it->size > 0) {
     while (!LIPS_NODE_VALID(*it->node)) {
       it->node++;
@@ -1723,6 +1736,20 @@ uint32_t GetRealNumargs(Lips_Interpreter* interpreter, Lips_Cell callable)
   return (GET_NUMARGS(callable) & 127) + (GET_NUMARGS(callable) >> 7);
 }
 
+void
+DefineWithCurrent(Lips_Interpreter* interpreter, Lips_Cell name, Lips_Cell value)
+{
+  TYPE_CHECK(interpreter, LIPS_TYPE_SYMBOL|LIPS_TYPE_STRING, name);
+  assert(value);
+  HashTable* env = InterpreterEnv(interpreter);
+  Lips_Cell* ptr = HashTableInsertWithHash(interpreter->alloc, interpreter->dealloc,
+                                           &interpreter->stack, env,
+                                           GET_STR(name)->hash, GET_STR(name)->ptr, value);
+  if (ptr == NULL) {
+    Lips_ThrowError(interpreter, "Value is already defined");
+  }
+}
+
 uint32_t
 CheckArgumentCount(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args)
 {
@@ -1757,10 +1784,9 @@ DefineArgumentList(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell 
     argvalues = GET_TAIL(argvalues);
     if (name) {
       if (argnames == NULL && argvalues != NULL) {
-        Lips_DefineCell(interpreter, name, prev);
-      } else {
-        Lips_DefineCell(interpreter, name, value);
+          value = prev;
       }
+      DefineWithCurrent(interpreter, name, value);
     }
   }
 }
@@ -1935,7 +1961,7 @@ LIPS_DECLARE_MACRO(macro)
   TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, GET_HEAD(args));
   (void)udata;
   uint32_t len;
-  Lips_Cell last = Lips_ListLastElement(interpreter, args, &len);
+  Lips_Cell last = Lips_ListLastElement(interpreter, GET_HEAD(args), &len);
   if (len > 127) {
     Lips_ThrowError(interpreter,
                     "Too many arguments(%u), in Lips language callables have up to 127 named arguments", len);

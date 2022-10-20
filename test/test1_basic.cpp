@@ -68,8 +68,11 @@ int main(int argc, char** argv) {
     "(aboba 123 3.141592)",
     "(progn (define hello \"world\") (define number 42))",
     "(list hello number)",
-    "(define func1 (lambda () (define some-value 1708)))",
+    "(define func1 (lambda () (define some-value 1707)))",
     "(func1)",
+    "some-value",
+    "(define macro1 (macro () (define some-value 2408)))",
+    "(macro1)",
     "some-value"
   };
   for (int i = 0; i < ARRAY_SIZE(test_strings); i++) {
