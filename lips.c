@@ -1746,11 +1746,18 @@ DefineArgumentList(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell 
   // define variables in a new environment
   Lips_Cell argnames = callable->data.lfunc.args;
   while (argnames) {
-    if (GET_HEAD(argnames)) {
-      Lips_DefineCell(interpreter, GET_HEAD(argnames), GET_HEAD(argvalues));
-    }
+    Lips_Cell name = GET_HEAD(argnames);
+    Lips_Cell value = GET_HEAD(argvalues);
+    Lips_Cell prev = argvalues;
     argnames = GET_TAIL(argnames);
     argvalues = GET_TAIL(argvalues);
+    if (name) {
+      if (argnames == NULL && argvalues != NULL) {
+        Lips_DefineCell(interpreter, name, prev);
+      } else {
+        Lips_DefineCell(interpreter, name, value);
+      }
+    }
   }
 }
 
