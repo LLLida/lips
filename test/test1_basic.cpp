@@ -65,7 +65,9 @@ int main(int argc, char** argv) {
     "(some-complicated-function \"%s\" \"hi\" 34)",
     // "(some-complicated-function 1 2 3 4)"
     "(printf \"%s\" (some-complicated-function 1 2 3 ) 42)",
-    "(aboba 123 3.141592)"
+    "(aboba 123 3.141592)",
+    "(progn (define hello \"world\") (define number 42))",
+    "(list hello number)"
   };
   for (int i = 0; i < ARRAY_SIZE(test_strings); i++) {
     const char* test_string = test_strings[i];

@@ -1504,8 +1504,8 @@ StackReleaseFromBack(Stack* stack, uint32_t bytes)
 EvalState*
 PushEvalState(Lips_Interpreter* interpreter)
 {
-  EvalState* newstate = StackRequire(interpreter->alloc, interpreter->dealloc,
-                                     &interpreter->stack, sizeof(EvalState));
+  EvalState* newstate = StackRequireFromBack(interpreter->alloc, interpreter->dealloc,
+                                             &interpreter->stack, sizeof(EvalState));
   newstate->parent = interpreter->evalpos;
   interpreter->evalpos = (uint8_t*)newstate - interpreter->stack.data;
   return newstate;
@@ -1516,7 +1516,7 @@ PopEvalState(Lips_Interpreter* interpreter)
 {
   EvalState* child = (EvalState*)(interpreter->stack.data + interpreter->evalpos);
   interpreter->evalpos = child->parent;
-  assert(StackRelease(&interpreter->stack, child) == sizeof(EvalState));
+  assert(StackReleaseFromBack(&interpreter->stack, sizeof(EvalState)) == child);
   if (interpreter->evalpos == STACK_INVALID_POS) {
     return NULL;
   }
