@@ -410,9 +410,11 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
       // just call C function
       Lips_Cell c = state->callable;
       if (Lips_IsFunction(c)) {
+        PushEnv(interp);
         ret = GET_CFUNC(c).ptr(interp, ES_ARG_COUNT(state), state->args.array, GET_CFUNC(c).udata);
         // array of arguments no more needed; we can free it
         FreeArgumentArray(interp, ES_ARG_COUNT(state), state->args.array);
+        PopEnv(interp);
       } else {
         ret = GET_CMACRO(c).ptr(interp, state->args.list, GET_CMACRO(c).udata);
       }
@@ -936,8 +938,10 @@ Lips_Invoke(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args)
                             (LIPS_TYPE_C_MACRO^LIPS_TYPE_MACRO))) {
     // just call C function
     if (Lips_IsFunction(callable)) {
+      PushEnv(interpreter);
       ret = GET_CFUNC(callable).ptr(interpreter, argslen, passing_args, GET_CFUNC(callable).udata);
       FreeArgumentArray(interpreter, argslen, passing_args);
+      PopEnv(interpreter);
     } else {
       ret = GET_CMACRO(callable).ptr(interpreter, args, GET_CMACRO(callable).udata);
     }
@@ -1724,7 +1728,7 @@ CheckArgumentCount(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell 
 {
   uint32_t numargs = GET_NUMARGS(callable) & (LIPS_NUM_ARGS_VAR-1);
   uint32_t variadic = GET_NUMARGS(callable) & LIPS_NUM_ARGS_VAR;
-  uint32_t listlen = Lips_ListLength(interpreter, args);
+  uint32_t listlen = (args) ? Lips_ListLength(interpreter, args) : 0;
   if ((numargs > listlen) ||
       (numargs < listlen && variadic == 0)) {
     Lips_ThrowError(interpreter,
