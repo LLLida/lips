@@ -4,7 +4,7 @@
 Lips_Interpreter* interp;
 #define ARRAY_SIZE(arr) sizeof(arr) / sizeof(arr[0])
 
-Lips_Cell my_function(Lips_Interpreter* interp, uint32_t numargs, Lips_Cell* args, void* udata) {
+LIPS_DECLARE_FUNCTION(my_function) {
   char buff[128];
   int n = 0;
   n += Lips_PrintCell(interp, args[0], buff+n, sizeof(buff)-n);
@@ -14,7 +14,7 @@ Lips_Cell my_function(Lips_Interpreter* interp, uint32_t numargs, Lips_Cell* arg
   return Lips_NewList(interp, 3, args);
 }
 
-Lips_Cell F_printf(Lips_Interpreter* interp, uint32_t numargs, Lips_Cell* args, void* udata) {
+LIPS_DECLARE_FUNCTION(printf) {
   static char buffer[1024];
   Lips_Cell list = Lips_NewList(interp, numargs, args);
   uint32_t n = Lips_PrintCell(interp, list, buffer, sizeof(buffer));
@@ -47,8 +47,8 @@ int main(int argc, char** argv) {
   printf("booba=%p\n", Lips_Intern(interp, "booba"));
   printf("q=%s\n", Lips_GetString(interp, Lips_Intern(interp, "q")));
 
-  Lips_Define(interp, "some-complicated-function", Lips_NewCFunction(interp, my_function, 3, NULL));
-  Lips_Define(interp, "printf", Lips_NewCFunction(interp, F_printf, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL));
+  Lips_Define(interp, "some-complicated-function", Lips_NewCFunction(interp, F_my_function, 3, NULL));
+  LIPS_DEFINE_FUNCTION(interp, printf, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
   Lips_Define(interp, "aboba", Lips_EvalString(interp, "(lambda (a b) (printf 3 (some-complicated-function 45.0 b \"muffin\") a 9))", NULL));
 
   Lips_Invoke(interp, Lips_Intern(interp, "some-complicated-function"), list);
