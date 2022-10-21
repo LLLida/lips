@@ -423,19 +423,19 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
       }
     } else {
       // push a new environment
-      HashTable* env = PushEnv(interp);
-      ES_INC_NUM_ENVS(state);
-      if (ES_ARG_COUNT(state) > 0) {
-        if (Lips_IsFunction(state->callable)) {
-          DefineArgumentArray(interp, state->callable, state->args.array);
-          // array of arguments no more needed; we can free it
-          FreeArgumentArray(interp, ES_ARG_COUNT(state), state->args.array);
-        } else {
-          DefineArgumentList(interp, state->callable, state->args.list);
+      if (ES_ARG_COUNT(state) > 0 || Lips_IsFunction(state->callable)) {
+        HashTable* env = PushEnv(interp);
+        ES_INC_NUM_ENVS(state);
+        if (ES_ARG_COUNT(state) > 0) {
+          if (Lips_IsFunction(state->callable)) {
+            DefineArgumentArray(interp, state->callable, state->args.array);
+            // array of arguments no more needed; we can free it
+            FreeArgumentArray(interp, ES_ARG_COUNT(state), state->args.array);
+          } else {
+            DefineArgumentList(interp, state->callable, state->args.list);
+            env->flags |= HASH_TABLE_CONSTANT_FLAG;
+          }
         }
-      }
-      if (Lips_IsMacro(state->callable)) {
-        env->flags |= HASH_TABLE_CONSTANT_FLAG;
       }
       // execute code
       ES_CODE(state) = GET_LFUNC(state->callable).body;
