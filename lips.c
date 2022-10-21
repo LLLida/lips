@@ -120,6 +120,7 @@ static LIPS_DECLARE_FUNCTION(car);
 static LIPS_DECLARE_FUNCTION(cdr);
 static LIPS_DECLARE_FUNCTION(equal);
 static LIPS_DECLARE_FUNCTION(nilp);
+static LIPS_DECLARE_FUNCTION(typeof);
 
 static LIPS_DECLARE_MACRO(lambda);
 static LIPS_DECLARE_MACRO(macro);
@@ -280,6 +281,13 @@ struct Lips_Interpreter {
   Lips_Cell S_nil;
   Lips_Cell S_t;
   Lips_Cell S_filename;
+  Lips_Cell T_integer;
+  Lips_Cell T_real;
+  Lips_Cell T_string;
+  Lips_Cell T_symbol;
+  Lips_Cell T_pair;
+  Lips_Cell T_function;
+  Lips_Cell T_macro;
   char errbuff[1024];
 };
 
@@ -313,6 +321,7 @@ Lips_CreateInterpreter(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc)
   Lips_Define(interp, "=", S_equal);
   Lips_Cell S_nilp = LIPS_DEFINE_FUNCTION(interp, nilp, LIPS_NUM_ARGS_1, NULL);
   Lips_Define(interp, "not", S_nilp);
+  LIPS_DEFINE_FUNCTION(interp, typeof, LIPS_NUM_ARGS_1, NULL);
 
   LIPS_DEFINE_MACRO(interp, lambda, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(interp, macro, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
@@ -321,6 +330,14 @@ Lips_CreateInterpreter(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc)
   LIPS_DEFINE_MACRO(interp, progn, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(interp, if, LIPS_NUM_ARGS_3|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(interp, when, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
+
+  interp->T_integer  = Lips_NewSymbol(interp, "integer");
+  interp->T_real     = Lips_NewSymbol(interp, "real");
+  interp->T_string   = Lips_NewSymbol(interp, "string");
+  interp->T_symbol   = Lips_NewSymbol(interp, "symbol");
+  interp->T_pair     = Lips_NewSymbol(interp, "pair");
+  interp->T_function = Lips_NewSymbol(interp, "function");
+  interp->T_macro    = Lips_NewSymbol(interp, "macro");
 
   return interp;
 }
@@ -1937,6 +1954,44 @@ LIPS_DECLARE_FUNCTION(nilp)
   assert(numargs == 1);
   Lips_Cell cells[2] = { args[0], interpreter->S_nil };
   return F_equal(interpreter, 2, cells, NULL);
+}
+
+LIPS_DECLARE_FUNCTION(typeof)
+{
+  (void)udata;
+  assert(numargs == 1);
+  Lips_Cell ret = NULL;
+  switch (GET_TYPE(args[0])) {
+  default: assert(0 && "faced undefined type");
+  case LIPS_TYPE_INTEGER:
+    ret = interpreter->T_integer;
+    break;
+  case LIPS_TYPE_REAL:
+    ret = interpreter->T_real;
+    break;
+  case LIPS_TYPE_STRING:
+    ret = interpreter->T_string;
+    break;
+  case LIPS_TYPE_SYMBOL:
+    ret = interpreter->T_symbol;
+    break;
+  case LIPS_TYPE_PAIR:
+    ret = interpreter->T_pair;
+    break;
+  case LIPS_TYPE_FUNCTION:
+  case LIPS_TYPE_C_FUNCTION:
+    ret = interpreter->T_function;
+    break;
+  case LIPS_TYPE_MACRO:
+  case LIPS_TYPE_C_MACRO:
+    ret = interpreter->T_macro;
+    break;
+  case LIPS_TYPE_USER:
+    // TODO: user types
+    Lips_ThrowError(interpreter, "User types are not supported currently");
+    break;
+  }
+  return ret;
 }
 
 LIPS_DECLARE_MACRO(lambda)

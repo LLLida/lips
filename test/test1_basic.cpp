@@ -73,7 +73,11 @@ int main(int argc, char** argv) {
     "some-value",
     "(define macro1 (macro () (define some-value 2408)))",
     "(macro1)",
-    "some-value"
+    "some-value",
+    "(progn (define hans 100000000) (define moke \"bzzzzz\"))",
+    "(list (typeof hans) (typeof moke))",
+    "(typeof lambda)",
+    "(typeof (typeof (typeof typeof)))"
   };
   for (int i = 0; i < ARRAY_SIZE(test_strings); i++) {
     const char* test_string = test_strings[i];
