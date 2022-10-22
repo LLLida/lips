@@ -1,7 +1,6 @@
 /* Lips - tiny Lisp interpreter designed for being embedded in games
  */
 #include "assert.h"
-#include "setjmp.h"
 #include "stdarg.h"
 #include "stdio.h"
 #include "string.h"
@@ -86,6 +85,10 @@ static void* StackReleaseFromBack(Stack* stack, uint32_t bytes);
 static EvalState* PushEvalState(Lips_Interpreter* interpreter);
 static EvalState* PopEvalState(Lips_Interpreter* interpreter);
 
+static void PushCatch(Lips_Interpreter* interpreter);
+static void PopCatch(Lips_Interpreter* interpreter);
+static EvalState* UnwindStack(Lips_Interpreter* interpreter);
+
 static HashTable* InterpreterEnv(Lips_Interpreter* interpreter);
 static HashTable* PushEnv(Lips_Interpreter* interpreter);
 static void PopEnv(Lips_Interpreter* interpreter);
@@ -121,6 +124,7 @@ static LIPS_DECLARE_FUNCTION(cdr);
 static LIPS_DECLARE_FUNCTION(equal);
 static LIPS_DECLARE_FUNCTION(nilp);
 static LIPS_DECLARE_FUNCTION(typeof);
+static LIPS_DECLARE_FUNCTION(throw);
 
 static LIPS_DECLARE_MACRO(lambda);
 static LIPS_DECLARE_MACRO(macro);
@@ -129,6 +133,7 @@ static LIPS_DECLARE_MACRO(quote);
 static LIPS_DECLARE_MACRO(progn);
 static LIPS_DECLARE_MACRO(if);
 static LIPS_DECLARE_MACRO(when);
+static LIPS_DECLARE_MACRO(catch);
 // TODO: implement cond
 /* static LIPS_DECLARE_MACRO(cond); */
 
@@ -245,18 +250,27 @@ struct EvalState {
       uint32_t count;
     } args;
     Lips_Cell code;
+    struct {
+      Lips_Cell sexplist;
+      uint32_t parent;
+    } catch;
   } data;
   uint32_t flags;
   // parent's position in stack
   uint32_t parent;
 };
-#define ES_NUM_ENVS(es) ((es)->flags >> 1)
-#define ES_STAGE(es) ((es)->flags & 1)
-#define ES_INC_NUM_ENVS(es) ((es)->flags += 2)
-#define ES_INC_STAGE(es) ((es)->flags += 1)
+#define ES_STAGE_EVALUATING_ARGS 0
+#define ES_STAGE_EXECUTING_CODE 1
+#define ES_STAGE_SEXP_LIST 2
+#define ES_NUM_ENVS(es) ((es)->flags >> 2)
+#define ES_STAGE(es) ((es)->flags & 3)
+#define ES_INC_NUM_ENVS(es) ((es)->flags += 4)
+#define ES_SET_STAGE(es, stage) (es)->flags = ((es)->flags & ~3) | stage
 #define ES_ARG_COUNT(es) (es)->data.args.count
 #define ES_LAST_ARG(es) (es)->data.args.last
 #define ES_CODE(es) (es)->data.code
+#define ES_SEXP_LIST(es) (es)->data.catch.sexplist
+#define ES_CATCH_PARENT(es) (es)->data.catch.parent
 
 struct Parser {
   const char* text;
@@ -277,7 +291,8 @@ struct Lips_Interpreter {
   Stack stack;
   uint32_t envpos;
   uint32_t evalpos;
-  jmp_buf jmp; // this is used for exceptions
+  uint32_t catchpos;
+  Lips_Cell throwvalue;
   Lips_Cell S_nil;
   Lips_Cell S_t;
   Lips_Cell S_filename;
@@ -290,6 +305,7 @@ struct Lips_Interpreter {
   Lips_Cell T_macro;
   char errbuff[1024];
 };
+#define CURRENT_EVAL_STATE(interp) (EvalState*)((interp)->stack.data + (interp)->evalpos)
 
 /// FUNCTIONS
 
@@ -309,6 +325,7 @@ Lips_CreateInterpreter(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc)
   env->parent = STACK_INVALID_POS;
   interp->envpos = ((uint8_t*)env - interp->stack.data);
   interp->evalpos = STACK_INVALID_POS;
+  interp->catchpos = STACK_INVALID_POS;
   // define builtins
   interp->S_nil = Lips_Define(interp, "nil", Lips_NewPair(interp, NULL, NULL));
   interp->S_t = Lips_Define(interp, "t", Lips_NewInteger(interp, 1));
@@ -322,6 +339,7 @@ Lips_CreateInterpreter(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc)
   Lips_Cell S_nilp = LIPS_DEFINE_FUNCTION(interp, nilp, LIPS_NUM_ARGS_1, NULL);
   Lips_Define(interp, "not", S_nilp);
   LIPS_DEFINE_FUNCTION(interp, typeof, LIPS_NUM_ARGS_1, NULL);
+  LIPS_DEFINE_FUNCTION(interp, throw, LIPS_NUM_ARGS_1, NULL);
 
   LIPS_DEFINE_MACRO(interp, lambda, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(interp, macro, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
@@ -330,6 +348,7 @@ Lips_CreateInterpreter(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc)
   LIPS_DEFINE_MACRO(interp, progn, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(interp, if, LIPS_NUM_ARGS_3|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(interp, when, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_MACRO(interp, catch, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
 
   interp->T_integer  = Lips_NewSymbol(interp, "integer");
   interp->T_real     = Lips_NewSymbol(interp, "real");
@@ -427,9 +446,9 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
     }
     if (GET_TYPE(state->callable) & ((LIPS_TYPE_C_FUNCTION^LIPS_TYPE_FUNCTION)|
                                      (LIPS_TYPE_C_MACRO^LIPS_TYPE_MACRO))) {
-      // just call C function
       Lips_Cell c = state->callable;
       if (Lips_IsFunction(c)) {
+        // every function must be executed inside it's own environment
         PushEnv(interp);
         ret = GET_CFUNC(c).ptr(interp, ES_ARG_COUNT(state), state->args.array, GET_CFUNC(c).udata);
         // array of arguments no more needed; we can free it
@@ -437,6 +456,18 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
         PopEnv(interp);
       } else {
         ret = GET_CMACRO(c).ptr(interp, state->args.list, GET_CMACRO(c).udata);
+      }
+      // fucntion returned null so need to go to latest catch
+      if (LIPS_UNLIKELY(ret == NULL)) {
+        if (ES_STAGE(state) == ES_STAGE_SEXP_LIST) {
+          goto pop2;
+        }
+        if (interp->catchpos >= startpos) {
+          // unhandled throw
+          return NULL;
+        }
+        state = UnwindStack(interp);
+        ret = interp->throwvalue;
       }
     } else {
       // push a new environment
@@ -456,7 +487,7 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
       }
       // execute code
       ES_CODE(state) = GET_LFUNC(state->callable).body;
-      ES_INC_STAGE(state);
+      ES_SET_STAGE(state, ES_STAGE_EXECUTING_CODE);
     code:
       while (ES_CODE(state)) {
         Lips_Cell expression = GET_HEAD(ES_CODE(state));
@@ -471,20 +502,32 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
         ES_CODE(state) = GET_TAIL(ES_CODE(state));
       }
     }
-    // because of tail call optimization 1 state may have more than 1 environments
-    for (uint32_t i = 0; i < ES_NUM_ENVS(state); i++) {
-      PopEnv(interp);
-    }
+  pop:
     state = PopEvalState(interp);
     if (interp->evalpos != startpos) {
-      if (ES_STAGE(state) == 0) {
+    pop2:
+      switch (ES_STAGE(state)) {
+      case ES_STAGE_EVALUATING_ARGS:
         *ES_LAST_ARG(state) = ret;
         ES_LAST_ARG(state)++;
         state->passed_args = GET_TAIL(state->passed_args);
         goto arg;
-      } else {
+      case ES_STAGE_EXECUTING_CODE:
         ES_CODE(state) = GET_TAIL(ES_CODE(state));
         goto code;
+      case ES_STAGE_SEXP_LIST:
+        if (ES_SEXP_LIST(state)) {
+          Lips_Cell sexp = GET_HEAD(ES_SEXP_LIST(state));
+          ES_SEXP_LIST(state) = GET_TAIL(ES_SEXP_LIST(state));
+          state = PushEvalState(interp);
+          state->sexp = sexp;
+          goto eval;
+        } else {
+          if (ES_CATCH_PARENT(state) != STACK_INVALID_POS) {
+            PopCatch(interp);
+          }
+          goto pop;
+        }
       }
     }
     return ret;
@@ -1540,6 +1583,9 @@ PushEvalState(Lips_Interpreter* interpreter)
 {
   EvalState* newstate = StackRequireFromBack(interpreter->alloc, interpreter->dealloc,
                                              &interpreter->stack, sizeof(EvalState));
+#ifndef NDEBUG
+  memset(newstate, 0, sizeof(EvalState));
+#endif
   newstate->parent = interpreter->evalpos;
   interpreter->evalpos = (uint8_t*)newstate - interpreter->stack.data;
   return newstate;
@@ -1548,13 +1594,43 @@ PushEvalState(Lips_Interpreter* interpreter)
 EvalState*
 PopEvalState(Lips_Interpreter* interpreter)
 {
-  EvalState* child = (EvalState*)(interpreter->stack.data + interpreter->evalpos);
+  EvalState* child = CURRENT_EVAL_STATE(interpreter);
+  // because of tail call optimization 1 state may have more than 1 environments
+  for (uint32_t i = 0; i < ES_NUM_ENVS(child); i++) {
+    PopEnv(interpreter);
+  }
   interpreter->evalpos = child->parent;
   assert(StackReleaseFromBack(&interpreter->stack, sizeof(EvalState)) == child);
   if (interpreter->evalpos == STACK_INVALID_POS) {
     return NULL;
   }
-  return (EvalState*)(interpreter->stack.data + interpreter->evalpos);
+  return CURRENT_EVAL_STATE(interpreter);
+}
+
+void
+PushCatch(Lips_Interpreter* interpreter)
+{
+  EvalState* state = CURRENT_EVAL_STATE(interpreter);
+  ES_CATCH_PARENT(state) = interpreter->catchpos;
+  interpreter->catchpos = (uint8_t*)state - interpreter->stack.data;
+}
+
+void
+PopCatch(Lips_Interpreter* interpreter)
+{
+  EvalState* catch = CURRENT_EVAL_STATE(interpreter);
+  interpreter->catchpos = ES_CATCH_PARENT(catch);
+}
+
+EvalState*
+UnwindStack(Lips_Interpreter* interpreter)
+{
+  EvalState* state = (EvalState*)(interpreter->stack.data + interpreter->evalpos);
+  while (interpreter->catchpos != interpreter->evalpos) {
+    state = PopEvalState(interpreter);
+  }
+  PopCatch(interpreter);
+  return state;
 }
 
 HashTable*
@@ -1994,6 +2070,14 @@ LIPS_DECLARE_FUNCTION(typeof)
   return ret;
 }
 
+LIPS_DECLARE_FUNCTION(throw)
+{
+  (void)udata;
+  assert(numargs == 1);
+  interpreter->throwvalue = args[0];
+  return NULL;
+}
+
 LIPS_DECLARE_MACRO(lambda)
 {
   TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, GET_HEAD(args));
@@ -2046,12 +2130,11 @@ LIPS_DECLARE_MACRO(quote)
 LIPS_DECLARE_MACRO(progn)
 {
   (void)udata;
-  Lips_Cell ret = NULL;
-  while (args != NULL) {
-    ret = Lips_Eval(interpreter, GET_HEAD(args));
-    args = GET_TAIL(args);
-  }
-  return ret;
+  EvalState* state = CURRENT_EVAL_STATE(interpreter);
+  ES_SET_STAGE(state, ES_STAGE_SEXP_LIST);
+  ES_SEXP_LIST(state) = args;
+  ES_CATCH_PARENT(state) = STACK_INVALID_POS;
+  return NULL;
 }
 
 LIPS_DECLARE_MACRO(if)
@@ -2072,4 +2155,12 @@ LIPS_DECLARE_MACRO(when)
     return M_progn(interpreter, GET_TAIL(args), NULL);
   }
   return interpreter->S_nil;
+}
+
+LIPS_DECLARE_MACRO(catch)
+{
+  (void)udata;
+  Lips_Cell ret = M_progn(interpreter, args, udata);
+  PushCatch(interpreter);
+  return ret;
 }

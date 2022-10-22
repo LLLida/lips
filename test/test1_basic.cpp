@@ -77,7 +77,8 @@ int main(int argc, char** argv) {
     "(progn (define hans 100000000) (define moke \"bzzzzz\"))",
     "(list (typeof hans) (typeof moke))",
     "(typeof lambda)",
-    "(typeof (typeof (typeof typeof)))"
+    "(typeof (typeof (typeof typeof)))",
+    "(catch (define kokin (quote bad)) (throw kokin) (list 1 2 3))"
   };
   for (int i = 0; i < ARRAY_SIZE(test_strings); i++) {
     const char* test_string = test_strings[i];
