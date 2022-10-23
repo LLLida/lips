@@ -114,7 +114,7 @@ static void IteratorNext(Iterator* it);
 static void DefineWithCurrent(Lips_Interpreter* interpreter, Lips_Cell name, Lips_Cell value);
 static uint32_t CheckArgumentCount(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args);
 static void DefineArgumentList(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell argvalues);
-static void DefineArgumentArray(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell* argvalues);
+static void DefineArgumentArray(Lips_Interpreter* interpreter, Lips_Cell callable, uint32_t numargs, Lips_Cell* argvalues);
 static void FreeArgumentArray(Lips_Interpreter* interpreter, uint32_t numargs, Lips_Cell* args);
 static Lips_Cell EvalNonPair(Lips_Interpreter* interpreter, Lips_Cell cell);
 
@@ -249,11 +249,10 @@ struct EvalState {
       Lips_Cell* last;
       uint32_t count;
     } args;
-    Lips_Cell code;
     struct {
-      Lips_Cell sexplist;
+      Lips_Cell code;
       uint32_t parent;
-    } catch;
+    } exec;
   } data;
   uint32_t flags;
   // parent's position in stack
@@ -261,16 +260,14 @@ struct EvalState {
 };
 #define ES_STAGE_EVALUATING_ARGS 0
 #define ES_STAGE_EXECUTING_CODE 1
-#define ES_STAGE_SEXP_LIST 2
-#define ES_NUM_ENVS(es) ((es)->flags >> 2)
-#define ES_STAGE(es) ((es)->flags & 3)
-#define ES_INC_NUM_ENVS(es) ((es)->flags += 4)
-#define ES_SET_STAGE(es, stage) (es)->flags = ((es)->flags & ~3) | stage
+#define ES_NUM_ENVS(es) ((es)->flags >> 1)
+#define ES_STAGE(es) ((es)->flags & 1)
+#define ES_INC_NUM_ENVS(es) ((es)->flags += 2)
+#define ES_SET_STAGE(es, stage) (es)->flags = ((es)->flags & ~1) | stage
 #define ES_ARG_COUNT(es) (es)->data.args.count
 #define ES_LAST_ARG(es) (es)->data.args.last
-#define ES_CODE(es) (es)->data.code
-#define ES_SEXP_LIST(es) (es)->data.catch.sexplist
-#define ES_CATCH_PARENT(es) (es)->data.catch.parent
+#define ES_CODE(es) (es)->data.exec.code
+#define ES_CATCH_PARENT(es) (es)->data.exec.parent
 
 struct Parser {
   const char* text;
@@ -459,8 +456,8 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
       }
       // fucntion returned null so need to go to latest catch
       if (LIPS_UNLIKELY(ret == NULL)) {
-        if (ES_STAGE(state) == ES_STAGE_SEXP_LIST) {
-          goto pop2;
+        if (ES_STAGE(state) == ES_STAGE_EXECUTING_CODE) {
+          goto code;
         }
         if (interp->catchpos >= startpos) {
           // unhandled throw
@@ -476,7 +473,7 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
         ES_INC_NUM_ENVS(state);
         if (ES_ARG_COUNT(state) > 0) {
           if (Lips_IsFunction(state->callable)) {
-            DefineArgumentArray(interp, state->callable, state->args.array);
+            DefineArgumentArray(interp, state->callable, ES_ARG_COUNT(state), state->args.array);
             // array of arguments no more needed; we can free it
             FreeArgumentArray(interp, ES_ARG_COUNT(state), state->args.array);
           } else {
@@ -502,10 +499,8 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
         ES_CODE(state) = GET_TAIL(ES_CODE(state));
       }
     }
-  pop:
     state = PopEvalState(interp);
     if (interp->evalpos != startpos) {
-    pop2:
       switch (ES_STAGE(state)) {
       case ES_STAGE_EVALUATING_ARGS:
         *ES_LAST_ARG(state) = ret;
@@ -515,19 +510,6 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
       case ES_STAGE_EXECUTING_CODE:
         ES_CODE(state) = GET_TAIL(ES_CODE(state));
         goto code;
-      case ES_STAGE_SEXP_LIST:
-        if (ES_SEXP_LIST(state)) {
-          Lips_Cell sexp = GET_HEAD(ES_SEXP_LIST(state));
-          ES_SEXP_LIST(state) = GET_TAIL(ES_SEXP_LIST(state));
-          state = PushEvalState(interp);
-          state->sexp = sexp;
-          goto eval;
-        } else {
-          if (ES_CATCH_PARENT(state) != STACK_INVALID_POS) {
-            PopCatch(interp);
-          }
-          goto pop;
-        }
       }
     }
     return ret;
@@ -1022,7 +1004,7 @@ Lips_Invoke(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args)
     HashTable* env = PushEnv(interpreter);
     if (argslen > 0) {
       if (Lips_IsFunction(callable)) {
-        DefineArgumentArray(interpreter, callable, passing_args);
+        DefineArgumentArray(interpreter, callable, argslen, passing_args);
         FreeArgumentArray(interpreter, argslen, passing_args);
       } else {
         env->flags |= HASH_TABLE_CONSTANT_FLAG;
@@ -1885,22 +1867,27 @@ DefineArgumentList(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell 
 }
 
 void
-DefineArgumentArray(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell* argvalues)
+DefineArgumentArray(Lips_Interpreter* interpreter, Lips_Cell callable,
+                    uint32_t numargs, Lips_Cell* argvalues)
 {
   // TODO: manage variadics
-  TYPE_CHECK(interpreter, LIPS_TYPE_FUNCTION|LIPS_TYPE_MACRO, callable);
+  TYPE_CHECK(interpreter, LIPS_TYPE_FUNCTION, callable);
   // reserve space for hash table
   HashTableReserve(interpreter->alloc, interpreter->dealloc,
                    &interpreter->stack, InterpreterEnv(interpreter),
                    GetRealNumargs(interpreter, callable));
   // define variables in a new environment
   Lips_Cell argnames = callable->data.lfunc.args;
-  while (argnames) {
+  uint32_t count = (GET_NUMARGS(callable) & 127);
+  for (uint32_t i = 0; i < count; i++) {
     if (GET_HEAD(argnames)) {
       Lips_DefineCell(interpreter, GET_HEAD(argnames), *argvalues);
     }
     argnames = GET_TAIL(argnames);
-    argvalues++;
+  }
+  if (GET_NUMARGS(callable) & LIPS_NUM_ARGS_VAR) {
+    Lips_Cell list = Lips_NewList(interpreter, numargs - count, argvalues+count);
+    Lips_DefineCell(interpreter, GET_HEAD(argnames), list);
   }
 }
 
@@ -2089,6 +2076,7 @@ LIPS_DECLARE_MACRO(lambda)
                     "Too many arguments(%u), in Lips language callables have up to 127 named arguments", len);
   }
   if (last && Lips_IsSymbol(last) && strcmp(GET_STR(last)->ptr, "...") == 0) {
+    len--;
     len |= LIPS_NUM_ARGS_VAR;
   }
   Lips_Cell lambda = Lips_NewFunction(interpreter, GET_HEAD(args), GET_TAIL(args), len);
@@ -2106,6 +2094,7 @@ LIPS_DECLARE_MACRO(macro)
                     "Too many arguments(%u), in Lips language callables have up to 127 named arguments", len);
   }
   if (last && Lips_IsSymbol(last) && strcmp(GET_STR(last)->ptr, "...") == 0) {
+    len--;
     len |= LIPS_NUM_ARGS_VAR;
   }
   Lips_Cell macro = Lips_NewMacro(interpreter, GET_HEAD(args), GET_TAIL(args), len);
@@ -2131,8 +2120,8 @@ LIPS_DECLARE_MACRO(progn)
 {
   (void)udata;
   EvalState* state = CURRENT_EVAL_STATE(interpreter);
-  ES_SET_STAGE(state, ES_STAGE_SEXP_LIST);
-  ES_SEXP_LIST(state) = args;
+  ES_SET_STAGE(state, ES_STAGE_EXECUTING_CODE);
+  ES_CODE(state) = args;
   ES_CATCH_PARENT(state) = STACK_INVALID_POS;
   return NULL;
 }

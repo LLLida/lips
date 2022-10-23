@@ -78,7 +78,11 @@ int main(int argc, char** argv) {
     "(list (typeof hans) (typeof moke))",
     "(typeof lambda)",
     "(typeof (typeof (typeof typeof)))",
-    "(catch (define kokin (quote bad)) (throw kokin) (list 1 2 3))"
+    "(catch (define kokin (quote bad)) (throw kokin) (list 1 2 3))",
+    "(define tail (lambda (a ...) (progn ...)))",
+    "(tail 1 2 3 4 5 6)",
+    "(define tail-macro (macro (a ...) (progn ...)))",
+    "(tail-macro 8 7 6 5 4 3 2 1)"
   };
   for (int i = 0; i < ARRAY_SIZE(test_strings); i++) {
     const char* test_string = test_strings[i];
