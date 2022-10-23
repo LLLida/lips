@@ -3,13 +3,17 @@
 
 * Roadmap
 
-** Add tests
+** Improve tests
 
-** User-defined types
+
 
 ** Decent error handling
 
-Implement exceptions via =setjmp= and =longjmp= at Lisp-side and return =NULL= on C-side.
+Exceptions are implemented. Need to improve error handling inside internal functions.
+
+** User-defined types
+
+This is a needed feature. Maybe I would make int, real user types?
 
 ** Efficient string/vector allocator
 
@@ -18,6 +22,18 @@ Reduce number of allocations by merging strings into pages.
 ** Garbage collector
 
 Use mark-and-sweep algorithm.
+
+** Improve API
+
+Library initialization should look like this:
+#+begin_src c
+  Lips_Description desc = { .alloc = alloc_function,
+                            . dealloc = dealloc_function,
+                            .initial_size = 1024,
+                            /* ... */
+                            .some_last_option = "blabla" };
+  Lips_Interpreter* interp = Lips_CreateInterpreter(&desc);
+#+end_src
 
 ** Builtin functions/macros
 
@@ -28,3 +44,5 @@ Use mark-and-sweep algorithm.
  5. string functions(=format=, =concat=, =capitalize= etc.)
 
 ** Docstrings
+
+Do we really need them?
