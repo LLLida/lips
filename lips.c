@@ -223,7 +223,7 @@ struct Node {
   Lips_Cell value;
   uint32_t hash;
 };
-#define LIPS_NODE_VALID(node) ((node).value != NULL)
+#define NODE_VALID(node) ((node).value != NULL)
 
 struct Bucket {
   Lips_Value* data;
@@ -1699,7 +1699,7 @@ HashTableReserve(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
     uint32_t oldSize = HASH_TABLE_GET_SIZE(ht);
     HASH_TABLE_SET_SIZE(ht, 0);
     for (uint32_t i = 0; i < preallocated; i++) {
-      if (LIPS_NODE_VALID(nodes[i])) {
+      if (NODE_VALID(nodes[i])) {
         HashTableInsertWithHash(alloc, dealloc, stack,
                                 ht, nodes[i].hash,
                                 nodes[i].key, nodes[i].value);
@@ -1728,7 +1728,7 @@ HashTableInsertWithHash(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* s
   }
   Node* data = HASH_TABLE_DATA(ht);
   uint32_t id = hash % ht->allocated;
-  while (LIPS_NODE_VALID(data[id])) {
+  while (NODE_VALID(data[id])) {
     // Hash table already has this element
     if (hash == data[id].hash && strcmp(data[id].key, key) == 0) {
       return NULL;
@@ -1758,7 +1758,7 @@ HashTableSearchWithHash(const HashTable* ht, uint32_t hash, const char* key)
   uint32_t id = hash;
   while (i < HASH_TABLE_GET_SIZE(ht)) {
     id = id % ht->allocated;
-    if (LIPS_NODE_VALID(data[id])) {
+    if (NODE_VALID(data[id])) {
       if (strcmp(data[id].key, key) == 0)
         return &data[id].value;
       i++;
@@ -1776,7 +1776,7 @@ HashTableIterate(HashTable* ht, Iterator* it) {
   it->node = HASH_TABLE_DATA(ht);
   it->size = HASH_TABLE_GET_SIZE(ht);
   if (it->size > 0) {
-    while (!LIPS_NODE_VALID(*it->node)) {
+    while (!NODE_VALID(*it->node)) {
       it->node++;
     }
   }
@@ -1798,7 +1798,7 @@ IteratorNext(Iterator* it) {
   assert(it->size > 0);
   it->node++;
   if (it->size > 1) {
-    while (!LIPS_NODE_VALID(*it->node)) {
+    while (!NODE_VALID(*it->node)) {
       it->node++;
     }
   }
@@ -1850,7 +1850,7 @@ DefineArgumentList(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell 
                    &interpreter->stack, InterpreterEnv(interpreter),
                    GetRealNumargs(interpreter, callable));
   // define variables in a new environment
-  Lips_Cell argnames = callable->data.lfunc.args;
+  Lips_Cell argnames = GET_LFUNC(callable).args;
   while (argnames) {
     Lips_Cell name = GET_HEAD(argnames);
     Lips_Cell value = GET_HEAD(argvalues);
@@ -1877,7 +1877,7 @@ DefineArgumentArray(Lips_Interpreter* interpreter, Lips_Cell callable,
                    &interpreter->stack, InterpreterEnv(interpreter),
                    GetRealNumargs(interpreter, callable));
   // define variables in a new environment
-  Lips_Cell argnames = callable->data.lfunc.args;
+  Lips_Cell argnames = GET_LFUNC(callable).args;
   uint32_t count = (GET_NUMARGS(callable) & 127);
   for (uint32_t i = 0; i < count; i++) {
     if (GET_HEAD(argnames)) {
