@@ -1841,7 +1841,7 @@ CheckArgumentCount(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell 
       (numargs < listlen && variadic == 0)) {
     Lips_SetError(interpreter,
                   "Invalid number of arguments, passed %u arguments, but callable accepts %u",
-                  numargs, listlen);
+                  listlen, numargs);
     return (uint32_t)-1;
   }
   return listlen;
