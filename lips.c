@@ -412,6 +412,9 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
     const uint32_t startpos = interp->evalpos;
     EvalState* state = PushEvalState(interp);
     state->sexp = cell;
+    if (LIPS_UNLIKELY(GET_HEAD(cell) == NULL)) {
+      return interp->S_nil;
+    }
   eval:
     state->flags = 0;
     state->passed_args = GET_TAIL(state->sexp);
