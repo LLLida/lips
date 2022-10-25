@@ -412,102 +412,107 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
     const uint32_t startpos = interp->evalpos;
     EvalState* state = PushEvalState(interp);
     state->sexp = cell;
-    if (LIPS_UNLIKELY(GET_HEAD(cell) == NULL)) {
-      return interp->S_nil;
-    }
   eval:
     state->flags = 0;
     state->passed_args = GET_TAIL(state->sexp);
     name = GET_HEAD(state->sexp);
-    TYPE_CHECK(interp, LIPS_TYPE_SYMBOL, name);
-    state->callable = Lips_InternCell(interp, name);
-    if (state->callable == NULL) {
-      LIPS_THROW_ERROR(interp, "Eval: undefined symbol '%s'", GET_STR(name)->ptr);
-    }
-    ES_ARG_COUNT(state) = CheckArgumentCount(interp, state->callable, state->passed_args);
-    if (LIPS_UNLIKELY(ES_ARG_COUNT(state) == (uint32_t)-1)) {
-      goto except;
-    }
-    if (Lips_IsFunction(state->callable)) {
-      // TODO: manage variable number of arguments
-      state->args.array = StackRequireFromBack(interp->alloc, interp->dealloc, &interp->stack,
-                                               ES_ARG_COUNT(state) * sizeof(Lips_Cell));
-      ES_LAST_ARG(state) = state->args.array;
-    arg:
-      while (state->passed_args) {
-        // eval arguments
-        Lips_Cell argument = GET_HEAD(state->passed_args);
-        if (GET_TYPE(argument) == LIPS_TYPE_PAIR) {
-          state = PushEvalState(interp);
-          state->sexp = argument;
-          goto eval;
-        } else {
-          *ES_LAST_ARG(state) = EvalNonPair(interp, argument);
-          ES_LAST_ARG(state)++;
-          state->passed_args = GET_TAIL(state->passed_args);
-        }
-      }
+    if (LIPS_UNLIKELY(name == NULL)) {
+      ret = interp->S_nil;
     } else {
-      state->args.list = state->passed_args;
-    }
-    if (GET_TYPE(state->callable) & ((LIPS_TYPE_C_FUNCTION^LIPS_TYPE_FUNCTION)|
-                                     (LIPS_TYPE_C_MACRO^LIPS_TYPE_MACRO))) {
-      Lips_Cell c = state->callable;
-      if (Lips_IsFunction(c)) {
-        // every function must be executed inside it's own environment
-        PushEnv(interp);
-        ret = GET_CFUNC(c).ptr(interp, ES_ARG_COUNT(state), state->args.array, GET_CFUNC(c).udata);
-        // array of arguments no more needed; we can free it
-        FreeArgumentArray(interp, ES_ARG_COUNT(state), state->args.array);
-        PopEnv(interp);
-      } else {
-        ret = GET_CMACRO(c).ptr(interp, state->args.list, GET_CMACRO(c).udata);
+      if (LIPS_UNLIKELY(!Lips_IsSymbol(name))) {
+        Lips_SetError(interp, "First part of evaluated s-expression always must be a symbol");
+        goto except;
       }
-      // fucntion returned null so need to go to latest catch
-      if (LIPS_UNLIKELY(ret == NULL)) {
-        if (ES_STAGE(state) == ES_STAGE_EXECUTING_CODE) {
-          goto code;
-        }
-      except:
-        if (interp->catchpos >= startpos) {
-          // unhandled throw
-          PopEvalState(interp);
-          return NULL;
-        }
-        state = UnwindStack(interp);
-        ret = interp->throwvalue;
+      state->callable = Lips_InternCell(interp, name);
+      if (LIPS_UNLIKELY(state->callable == interp->S_nil)) {
+        Lips_SetError(interp, "Eval: undefined symbol '%s'", GET_STR(name)->ptr);
+        goto except;
       }
-    } else {
-      // push a new environment
-      if (ES_ARG_COUNT(state) > 0 || Lips_IsFunction(state->callable)) {
-        HashTable* env = PushEnv(interp);
-        ES_INC_NUM_ENVS(state);
-        if (ES_ARG_COUNT(state) > 0) {
-          if (Lips_IsFunction(state->callable)) {
-            DefineArgumentArray(interp, state->callable, ES_ARG_COUNT(state), state->args.array);
-            // array of arguments no more needed; we can free it
-            FreeArgumentArray(interp, ES_ARG_COUNT(state), state->args.array);
+      ES_ARG_COUNT(state) = CheckArgumentCount(interp, state->callable, state->passed_args);
+      if (LIPS_UNLIKELY(ES_ARG_COUNT(state) == (uint32_t)-1)) {
+        goto except;
+      }
+      if (Lips_IsFunction(state->callable)) {
+        // TODO: manage variable number of arguments
+        state->args.array = StackRequireFromBack(interp->alloc, interp->dealloc, &interp->stack,
+                                                 ES_ARG_COUNT(state) * sizeof(Lips_Cell));
+        ES_LAST_ARG(state) = state->args.array;
+      arg:
+        while (state->passed_args) {
+          // eval arguments
+          Lips_Cell argument = GET_HEAD(state->passed_args);
+          if (GET_TYPE(argument) == LIPS_TYPE_PAIR) {
+            state = PushEvalState(interp);
+            state->sexp = argument;
+            goto eval;
           } else {
-            DefineArgumentList(interp, state->callable, state->args.list);
-            env->flags |= HASH_TABLE_CONSTANT_FLAG;
+            *ES_LAST_ARG(state) = EvalNonPair(interp, argument);
+            ES_LAST_ARG(state)++;
+            state->passed_args = GET_TAIL(state->passed_args);
           }
         }
+      } else {
+        state->args.list = state->passed_args;
       }
-      // execute code
-      ES_CODE(state) = GET_LFUNC(state->callable).body;
-      ES_SET_STAGE(state, ES_STAGE_EXECUTING_CODE);
-    code:
-      while (ES_CODE(state)) {
-        Lips_Cell expression = GET_HEAD(ES_CODE(state));
-        if (GET_TYPE(expression) == LIPS_TYPE_PAIR) {
-          // TODO: implement tail call optimization
-          state = PushEvalState(interp);
-          state->sexp = expression;
-          goto eval;
+      if (GET_TYPE(state->callable) & ((LIPS_TYPE_C_FUNCTION^LIPS_TYPE_FUNCTION)|
+                                       (LIPS_TYPE_C_MACRO^LIPS_TYPE_MACRO))) {
+        Lips_Cell c = state->callable;
+        if (Lips_IsFunction(c)) {
+          // every function must be executed inside it's own environment
+          PushEnv(interp);
+          ret = GET_CFUNC(c).ptr(interp, ES_ARG_COUNT(state), state->args.array, GET_CFUNC(c).udata);
+          // array of arguments no more needed; we can free it
+          FreeArgumentArray(interp, ES_ARG_COUNT(state), state->args.array);
+          PopEnv(interp);
         } else {
-          ret = EvalNonPair(interp, expression);
+          ret = GET_CMACRO(c).ptr(interp, state->args.list, GET_CMACRO(c).udata);
         }
-        ES_CODE(state) = GET_TAIL(ES_CODE(state));
+        // fucntion returned null so need to go to latest catch
+        if (LIPS_UNLIKELY(ret == NULL)) {
+          if (ES_STAGE(state) == ES_STAGE_EXECUTING_CODE) {
+            goto code;
+          }
+        except:
+          if (interp->catchpos >= startpos) {
+            // unhandled throw
+            PopEvalState(interp);
+            return NULL;
+          }
+          state = UnwindStack(interp);
+          ret = interp->throwvalue;
+        }
+      } else {
+        // push a new environment
+        if (ES_ARG_COUNT(state) > 0 || Lips_IsFunction(state->callable)) {
+          HashTable* env = PushEnv(interp);
+          ES_INC_NUM_ENVS(state);
+          if (ES_ARG_COUNT(state) > 0) {
+            if (Lips_IsFunction(state->callable)) {
+              DefineArgumentArray(interp, state->callable, ES_ARG_COUNT(state), state->args.array);
+              // array of arguments no more needed; we can free it
+              FreeArgumentArray(interp, ES_ARG_COUNT(state), state->args.array);
+            } else {
+              DefineArgumentList(interp, state->callable, state->args.list);
+              env->flags |= HASH_TABLE_CONSTANT_FLAG;
+            }
+          }
+        }
+        // execute code
+        ES_CODE(state) = GET_LFUNC(state->callable).body;
+        ES_SET_STAGE(state, ES_STAGE_EXECUTING_CODE);
+      code:
+        while (ES_CODE(state)) {
+          Lips_Cell expression = GET_HEAD(ES_CODE(state));
+          if (GET_TYPE(expression) == LIPS_TYPE_PAIR) {
+            // TODO: implement tail call optimization
+            state = PushEvalState(interp);
+            state->sexp = expression;
+            goto eval;
+          } else {
+            ret = EvalNonPair(interp, expression);
+          }
+          ES_CODE(state) = GET_TAIL(ES_CODE(state));
+        }
       }
     }
     state = PopEvalState(interp);
@@ -1861,18 +1866,14 @@ DefineArgumentList(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell 
                    GetRealNumargs(interpreter, callable));
   // define variables in a new environment
   Lips_Cell argnames = GET_LFUNC(callable).args;
-  while (argnames) {
-    Lips_Cell name = GET_HEAD(argnames);
-    Lips_Cell value = GET_HEAD(argvalues);
-    Lips_Cell prev = argvalues;
+  uint32_t count = (GET_NUMARGS(callable) & (LIPS_NUM_ARGS_VAR-1));
+  for (uint32_t i = 0; i < count; i++) {
+    DefineWithCurrent(interpreter, GET_HEAD(argnames), GET_HEAD(argvalues));
     argnames = GET_TAIL(argnames);
     argvalues = GET_TAIL(argvalues);
-    if (name) {
-      if (argnames == NULL && argvalues != NULL) {
-          value = prev;
-      }
-      DefineWithCurrent(interpreter, name, value);
-    }
+  }
+  if (GET_NUMARGS(callable) & LIPS_NUM_ARGS_VAR) {
+    DefineWithCurrent(interpreter, GET_HEAD(argnames), argvalues);
   }
 }
 
@@ -1887,11 +1888,12 @@ DefineArgumentArray(Lips_Interpreter* interpreter, Lips_Cell callable,
                    GetRealNumargs(interpreter, callable));
   // define variables in a new environment
   Lips_Cell argnames = GET_LFUNC(callable).args;
-  uint32_t count = (GET_NUMARGS(callable) & 127);
+  uint32_t count = (GET_NUMARGS(callable) & (LIPS_NUM_ARGS_VAR-1));
   for (uint32_t i = 0; i < count; i++) {
     if (GET_HEAD(argnames)) {
       Lips_DefineCell(interpreter, GET_HEAD(argnames), *argvalues);
     }
+    argvalues++;
     argnames = GET_TAIL(argnames);
   }
   if (GET_NUMARGS(callable) & LIPS_NUM_ARGS_VAR) {

@@ -33,6 +33,8 @@ extern "C" {
   #define LIPS_HOT_FUNCTION
   #define LIPS_COLD_FUNCTION
   #define LIPS_DEPRECATED_FUNCTION
+#define LIPS_LIKELY(x) (x)
+#define LIPS_UNLIKELY(x) (x)
 #endif
 
 typedef void*(*Lips_AllocFunc)(size_t bytes);

@@ -85,7 +85,9 @@ int main(int argc, char** argv) {
     "(tail-macro 8 7 6 5 4 3 2 1)",
     "(define poker-face (lambda (arg) (throw arg)))",
     "(catch (poker-face 333) (quote error))",
-    "()"
+    "()",
+    "(catch (3 \"kitty\" 3.141592))",
+    "(catch (lady gaga))"
   };
   for (int i = 0; i < ARRAY_SIZE(test_strings); i++) {
     const char* test_string = test_strings[i];
