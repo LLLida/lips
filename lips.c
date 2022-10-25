@@ -41,7 +41,10 @@ typedef struct EvalState EvalState;
 #define IS_SPECIAL_CHAR(c) ((c) == '(' || (c) == ')' || (c) == '\'' || (c) == '`')
 #define IS_DIGIT(c) ((c) >= '0' && (c) <= '9')
 #define LOG_ERROR(interpreter, ...) snprintf(interpreter->errbuff, sizeof(interpreter->errbuff), __VA_ARGS__)
-#define TYPE_CHECK(interpreter, type, cell) if (!(GET_TYPE(cell) & (type))) Lips_ThrowError(interpreter, "Typecheck failed (%d & %d)", GET_TYPE(cell), type);
+#define TYPE_CHECK(interpreter, type, cell) if (!(GET_TYPE(cell) & (type))) LIPS_THROW_ERROR(interpreter, "Typecheck failed (%d & %d)", GET_TYPE(cell), type);
+#define TYPE_CHECK_FORCED(type, cell) do {                              \
+    assert((GET_TYPE(cell) & (type)) && "Typecheck failed");            \
+  } while (0)
 #define GET_STR(cell) (cell->data.str)
 
 /// LIST OF FUNCTIONS
@@ -416,9 +419,12 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
     TYPE_CHECK(interp, LIPS_TYPE_SYMBOL, name);
     state->callable = Lips_InternCell(interp, name);
     if (state->callable == NULL) {
-      Lips_ThrowError(interp, "Eval: undefined symbol '%s'", GET_STR(name)->ptr);
+      LIPS_THROW_ERROR(interp, "Eval: undefined symbol '%s'", GET_STR(name)->ptr);
     }
     ES_ARG_COUNT(state) = CheckArgumentCount(interp, state->callable, state->passed_args);
+    if (LIPS_UNLIKELY(ES_ARG_COUNT(state) == (uint32_t)-1)) {
+      goto except;
+    }
     if (Lips_IsFunction(state->callable)) {
       // TODO: manage variable number of arguments
       state->args.array = StackRequireFromBack(interp->alloc, interp->dealloc, &interp->stack,
@@ -459,8 +465,10 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
         if (ES_STAGE(state) == ES_STAGE_EXECUTING_CODE) {
           goto code;
         }
+      except:
         if (interp->catchpos >= startpos) {
           // unhandled throw
+          PopEvalState(interp);
           return NULL;
         }
         state = UnwindStack(interp);
@@ -826,7 +834,8 @@ Lips_PrintCell(Lips_Interpreter* interpreter, Lips_Cell cell, char* buff, uint32
 uint32_t
 Lips_ListLength(Lips_Interpreter* interp, Lips_Cell list)
 {
-  TYPE_CHECK(interp, LIPS_TYPE_PAIR, list);
+  (void)interp;
+  TYPE_CHECK_FORCED(LIPS_TYPE_PAIR, list);
   uint32_t count = 0;
   if (GET_HEAD(list) == NULL) {
     assert(GET_TAIL(list) == NULL && "internal error: list semantic error");
@@ -912,8 +921,7 @@ Lips_Define(Lips_Interpreter* interpreter, const char* name, Lips_Cell cell)
                                    &interpreter->stack, env,
                                    name, cell);
   if (ptr == NULL) {
-    Lips_ThrowError(interpreter, "Value is already defined");
-    return NULL;
+    LIPS_THROW_ERROR(interpreter, "Value '%s' is already defined", name);
   }
   return cell;
 }
@@ -931,8 +939,7 @@ Lips_DefineCell(Lips_Interpreter* interpreter, Lips_Cell cell, Lips_Cell value)
                                            &interpreter->stack, env,
                                            GET_STR(cell)->hash, GET_STR(cell)->ptr, value);
   if (ptr == NULL) {
-    Lips_ThrowError(interpreter, "Value is already defined");
-    return NULL;
+    LIPS_THROW_ERROR(interpreter, "Value '%s' is already defined");
   }
   return value;
 }
@@ -1030,9 +1037,9 @@ Lips_SetError(Lips_Interpreter* interpreter, const char* fmt, ...)
 {
   va_list ap;
   va_start(ap, fmt);
-  vsnprintf(interpreter->errbuff, sizeof(interpreter->errbuff), fmt, ap);
+  int len = vsnprintf(interpreter->errbuff, sizeof(interpreter->errbuff), fmt, ap);
   va_end(ap);
-  fflush(stdout);
+  interpreter->throwvalue = Lips_NewStringN(interpreter, interpreter->errbuff, len);
   return interpreter->errbuff;
 }
 
@@ -1040,7 +1047,7 @@ int64_t
 Lips_GetInteger(Lips_Interpreter* interpreter, Lips_Cell cell)
 {
   (void)interpreter;
-  TYPE_CHECK(interpreter, LIPS_TYPE_INTEGER, cell);
+  TYPE_CHECK_FORCED(LIPS_TYPE_INTEGER, cell);
   return GET_INTEGER(cell);
 }
 
@@ -1048,7 +1055,7 @@ double
 Lips_GetReal(Lips_Interpreter* interpreter, Lips_Cell cell)
 {
   (void)interpreter;
-  TYPE_CHECK(interpreter, LIPS_TYPE_REAL, cell);
+  TYPE_CHECK_FORCED(LIPS_TYPE_REAL, cell);
   return GET_REAL(cell);
 }
 
@@ -1807,22 +1814,21 @@ IteratorNext(Iterator* it) {
 
 uint32_t GetRealNumargs(Lips_Interpreter* interpreter, Lips_Cell callable)
 {
-  TYPE_CHECK(interpreter, LIPS_TYPE_FUNCTION|LIPS_TYPE_MACRO, callable);
+  (void)interpreter;
+  TYPE_CHECK_FORCED(LIPS_TYPE_FUNCTION|LIPS_TYPE_MACRO, callable);
   return (GET_NUMARGS(callable) & 127) + (GET_NUMARGS(callable) >> 7);
 }
 
 void
 DefineWithCurrent(Lips_Interpreter* interpreter, Lips_Cell name, Lips_Cell value)
 {
-  TYPE_CHECK(interpreter, LIPS_TYPE_SYMBOL|LIPS_TYPE_STRING, name);
+  TYPE_CHECK_FORCED(LIPS_TYPE_SYMBOL|LIPS_TYPE_STRING, name);
   assert(value);
   HashTable* env = InterpreterEnv(interpreter);
   Lips_Cell* ptr = HashTableInsertWithHash(interpreter->alloc, interpreter->dealloc,
                                            &interpreter->stack, env,
                                            GET_STR(name)->hash, GET_STR(name)->ptr, value);
-  if (ptr == NULL) {
-    Lips_ThrowError(interpreter, "Value is already defined");
-  }
+  assert(ptr && "Internal error(value is already defined)");
 }
 
 uint32_t
@@ -1833,9 +1839,10 @@ CheckArgumentCount(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell 
   uint32_t listlen = (args) ? Lips_ListLength(interpreter, args) : 0;
   if ((numargs > listlen) ||
       (numargs < listlen && variadic == 0)) {
-    Lips_ThrowError(interpreter,
-                    "Invalid number of arguments, passed %u arguments, but callable accepts %u",
-                    numargs, listlen);
+    Lips_SetError(interpreter,
+                  "Invalid number of arguments, passed %u arguments, but callable accepts %u",
+                  numargs, listlen);
+    return (uint32_t)-1;
   }
   return listlen;
 }
@@ -1843,8 +1850,8 @@ CheckArgumentCount(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell 
 void
 DefineArgumentList(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell argvalues)
 {
-  TYPE_CHECK(interpreter, LIPS_TYPE_FUNCTION|LIPS_TYPE_MACRO, callable);
-  TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, argvalues);
+  TYPE_CHECK_FORCED(LIPS_TYPE_FUNCTION|LIPS_TYPE_MACRO, callable);
+  TYPE_CHECK_FORCED(LIPS_TYPE_PAIR, argvalues);
   // reserve space for hash table
   HashTableReserve(interpreter->alloc, interpreter->dealloc,
                    &interpreter->stack, InterpreterEnv(interpreter),
@@ -1870,8 +1877,7 @@ void
 DefineArgumentArray(Lips_Interpreter* interpreter, Lips_Cell callable,
                     uint32_t numargs, Lips_Cell* argvalues)
 {
-  // TODO: manage variadics
-  TYPE_CHECK(interpreter, LIPS_TYPE_FUNCTION, callable);
+  TYPE_CHECK_FORCED(LIPS_TYPE_FUNCTION, callable);
   // reserve space for hash table
   HashTableReserve(interpreter->alloc, interpreter->dealloc,
                    &interpreter->stack, InterpreterEnv(interpreter),
@@ -2051,7 +2057,7 @@ LIPS_DECLARE_FUNCTION(typeof)
     break;
   case LIPS_TYPE_USER:
     // TODO: user types
-    Lips_ThrowError(interpreter, "User types are not supported currently");
+    LIPS_THROW_ERROR(interpreter, "User types are not supported currently");
     break;
   }
   return ret;
@@ -2062,6 +2068,7 @@ LIPS_DECLARE_FUNCTION(throw)
   (void)udata;
   assert(numargs == 1);
   interpreter->throwvalue = args[0];
+  Lips_PrintCell(interpreter, interpreter->throwvalue, interpreter->errbuff, sizeof(interpreter->errbuff));
   return NULL;
 }
 
@@ -2072,8 +2079,8 @@ LIPS_DECLARE_MACRO(lambda)
   uint32_t len;
   Lips_Cell last = Lips_ListLastElement(interpreter, GET_HEAD(args), &len);
   if (len > 127) {
-    Lips_ThrowError(interpreter,
-                    "Too many arguments(%u), in Lips language callables have up to 127 named arguments", len);
+    LIPS_THROW_ERROR(interpreter,
+                     "Too many arguments(%u), in Lips language callables have up to 127 named arguments", len);
   }
   if (last && Lips_IsSymbol(last) && strcmp(GET_STR(last)->ptr, "...") == 0) {
     len--;
@@ -2090,7 +2097,7 @@ LIPS_DECLARE_MACRO(macro)
   uint32_t len;
   Lips_Cell last = Lips_ListLastElement(interpreter, GET_HEAD(args), &len);
   if (len > 127) {
-    Lips_ThrowError(interpreter,
+    LIPS_THROW_ERROR(interpreter,
                     "Too many arguments(%u), in Lips language callables have up to 127 named arguments", len);
   }
   if (last && Lips_IsSymbol(last) && strcmp(GET_STR(last)->ptr, "...") == 0) {

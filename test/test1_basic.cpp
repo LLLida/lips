@@ -82,7 +82,9 @@ int main(int argc, char** argv) {
     "(define tail (lambda (a ...) (progn ...)))",
     "(tail 1 2 3 4 5 6)",
     "(define tail-macro (macro (a ...) (progn ...)))",
-    "(tail-macro 8 7 6 5 4 3 2 1)"
+    "(tail-macro 8 7 6 5 4 3 2 1)",
+    "(define poker-face (lambda (arg) (throw arg)))",
+    "(catch (poker-face 333) (quote error))"
   };
   for (int i = 0; i < ARRAY_SIZE(test_strings); i++) {
     const char* test_string = test_strings[i];

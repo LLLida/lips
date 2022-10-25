@@ -170,10 +170,11 @@ const char* Lips_SetError(Lips_Interpreter* interpreter, const char* fmt, ...);
 #define Lips_IsEnv(cell) (Lips_GetType(cell) & LIPS_TYPE_ENV)
 #define Lips_IsFunction(cell) (Lips_GetType(cell) & LIPS_TYPE_FUNCTION)
 #define Lips_IsMacro(cell) (Lips_GetType(cell) & LIPS_TYPE_MACRO)
-#define Lips_ThrowError(interpreter, ...) do { \
-    Lips_SetError(interpreter, ##__VA_ARGS__);   \
-    assert(0);                                      \
-  } while(0)
+  
+#define LIPS_THROW_ERROR(interpreter, ...) do {\
+  Lips_SetError(interpreter, ##__VA_ARGS__);   \
+  return NULL;                                 \
+} while (0)
 
 #ifdef __cplusplus
 }

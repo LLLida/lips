@@ -16,7 +16,11 @@ int main(int argc, char** argv) {
       break;
     }
     eval = Lips_EvalString(interp, buff, NULL);
-    Lips_PrintCell(interp, eval, buff, sizeof(buff));
+    if (eval) {
+      Lips_PrintCell(interp, eval, buff, sizeof(buff));
+    } else {
+      sprintf(buff, "Unhandled exception: %s", Lips_GetError(interp));
+    }
     printf("%s\n", buff);
   }
   Lips_DestroyInterpreter(interp);
