@@ -19,6 +19,7 @@
 #define NUM_DEFAULT_BUCKETS 16
 #endif
 
+
 /// LIST OF STRUCTS
 
 typedef struct Bucket Bucket;
@@ -31,6 +32,7 @@ typedef struct StringData StringData;
 typedef struct Token Token;
 typedef struct EvalState EvalState;
 
+
 /// MACROS
 
 #define LIPS_EOF (-1)
@@ -41,12 +43,13 @@ typedef struct EvalState EvalState;
 #define IS_SPECIAL_CHAR(c) ((c) == '(' || (c) == ')' || (c) == '\'' || (c) == '`')
 #define IS_DIGIT(c) ((c) >= '0' && (c) <= '9')
 #define LOG_ERROR(interpreter, ...) snprintf(interpreter->errbuff, sizeof(interpreter->errbuff), __VA_ARGS__)
-#define TYPE_CHECK(interpreter, type, cell) if (!(GET_TYPE(cell) & (type))) LIPS_THROW_ERROR(interpreter, "Typecheck failed (%d & %d)", GET_TYPE(cell), type);
+#define TYPE_CHECK(interpreter, type, cell) if (!(GET_TYPE(cell) & (type))) LIPS_THROW_ERROR(interpreter, "Typecheck failed (%d & %d) at line %d", GET_TYPE(cell), type, __LINE__);
 #define TYPE_CHECK_FORCED(type, cell) do {                              \
-    assert((GET_TYPE(cell) & (type)) && "Typecheck failed");            \
+    assert((GET_TYPE(cell) & (type)) && "Typecheck failed"); \
   } while (0)
 #define GET_STR(cell) (cell->data.str)
 
+
 /// LIST OF FUNCTIONS
 
 static void* DefaultAlloc(size_t bytes);
@@ -130,6 +133,7 @@ static LIPS_DECLARE_FUNCTION(equal);
 static LIPS_DECLARE_FUNCTION(nilp);
 static LIPS_DECLARE_FUNCTION(typeof);
 static LIPS_DECLARE_FUNCTION(throw);
+static LIPS_DECLARE_FUNCTION(call);
 
 static LIPS_DECLARE_MACRO(lambda);
 static LIPS_DECLARE_MACRO(macro);
@@ -343,6 +347,7 @@ Lips_CreateInterpreter(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc)
   Lips_Define(interp, "not", S_nilp);
   LIPS_DEFINE_FUNCTION(interp, typeof, LIPS_NUM_ARGS_1, NULL);
   LIPS_DEFINE_FUNCTION(interp, throw, LIPS_NUM_ARGS_1, NULL);
+  LIPS_DEFINE_FUNCTION(interp, call, LIPS_NUM_ARGS_2, NULL);
 
   LIPS_DEFINE_MACRO(interp, lambda, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(interp, macro, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
@@ -988,59 +993,9 @@ Lips_InternCell(Lips_Interpreter* interpreter, Lips_Cell cell)
 LIPS_HOT_FUNCTION Lips_Cell
 Lips_Invoke(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args)
 {
-  Lips_Cell ret;
-  TYPE_CHECK(interpreter, LIPS_TYPE_FUNCTION|LIPS_TYPE_MACRO, callable);
-  TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, args);
-  uint32_t argslen = CheckArgumentCount(interpreter, callable, args);
-  Lips_Cell* passing_args;
-  // evaluate arguments
-  if (Lips_IsFunction(callable)) {
-    passing_args = StackRequireFromBack(interpreter->alloc, interpreter->dealloc,
-                                        &interpreter->stack,
-                                        argslen * sizeof(Lips_Cell));
-    Lips_Cell* last = passing_args;
-    while (args) {
-      if (GET_HEAD(args)) {
-        *last = Lips_Eval(interpreter, GET_HEAD(args));
-        last++;
-      }
-      args = GET_TAIL(args);
-    }
-  }
-  if (GET_TYPE(callable) & ((LIPS_TYPE_C_FUNCTION^LIPS_TYPE_FUNCTION)|
-                            (LIPS_TYPE_C_MACRO^LIPS_TYPE_MACRO))) {
-    // just call C function
-    if (Lips_IsFunction(callable)) {
-      PushEnv(interpreter);
-      ret = GET_CFUNC(callable).ptr(interpreter, argslen, passing_args, GET_CFUNC(callable).udata);
-      FreeArgumentArray(interpreter, argslen, passing_args);
-      PopEnv(interpreter);
-    } else {
-      ret = GET_CMACRO(callable).ptr(interpreter, args, GET_CMACRO(callable).udata);
-    }
-  } else {
-    // push a new environment
-    HashTable* env = PushEnv(interpreter);
-    if (argslen > 0) {
-      if (Lips_IsFunction(callable)) {
-        DefineArgumentArray(interpreter, callable, argslen, passing_args);
-        FreeArgumentArray(interpreter, argslen, passing_args);
-      } else {
-        env->flags |= HASH_TABLE_CONSTANT_FLAG;
-        DefineArgumentList(interpreter, callable, args);
-      }
-    }
-    // execute code
-    Lips_Cell code = GET_LFUNC(callable).body;
-    while (code) {
-      if (GET_HEAD(code)) {
-        ret = Lips_Eval(interpreter, GET_HEAD(code));
-      }
-      code = GET_TAIL(code);
-    }
-    // pop environment
-    PopEnv(interpreter);
-  }
+  Lips_Cell ast = Lips_NewPair(interpreter, callable, args);
+  Lips_Cell ret = Lips_Eval(interpreter, ast);
+  // FIXME: should we destroy 'ast'?
   return ret;
 }
 
@@ -2088,6 +2043,15 @@ LIPS_DECLARE_FUNCTION(throw)
   interpreter->throwvalue = args[0];
   Lips_PrintCell(interpreter, interpreter->throwvalue, interpreter->errbuff, sizeof(interpreter->errbuff));
   return NULL;
+}
+
+LIPS_DECLARE_FUNCTION(call)
+{
+  (void)udata;
+  assert(numargs == 2);
+  TYPE_CHECK(interpreter, LIPS_TYPE_SYMBOL, args[0]);
+  TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, args[1]);
+  return Lips_Invoke(interpreter, args[0], args[1]);
 }
 
 LIPS_DECLARE_MACRO(lambda)

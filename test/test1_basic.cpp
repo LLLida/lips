@@ -51,14 +51,11 @@ int main(int argc, char** argv) {
   LIPS_DEFINE_FUNCTION(interp, printf, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
   Lips_Define(interp, "aboba", Lips_EvalString(interp, "(lambda (a b) (printf 3 (some-complicated-function 45.0 b \"muffin\") a 9))", NULL));
 
-  Lips_Invoke(interp, Lips_Intern(interp, "some-complicated-function"), list);
+  Lips_Invoke(interp, Lips_NewSymbol(interp, "some-complicated-function"), list);
 
   PRINT_CELL(Lips_Intern(interp, "some-complicated-function"), "func");
   PRINT_CELL(Lips_Intern(interp, "macro"), "macro");
   PRINT_CELL(Lips_Intern(interp, "lambda"), "lambda");
-
-  Lips_Cell carry = Lips_EvalString(interp, "(lambda () (some-complicated-function \"1\" 3 9.09))", NULL);
-  Lips_Invoke(interp, carry, Lips_Nil(interp));
 
   const char* test_strings[] = {
     "(printf \"Hello world\" 10 3.14 booba)",
@@ -87,13 +84,19 @@ int main(int argc, char** argv) {
     "(catch (poker-face 333) (quote error))",
     "()",
     "(catch (3 \"kitty\" 3.141592))",
-    "(catch (lady gaga))"
+    "(catch (lady gaga))",
+    "(define catch2 (macro (...) (call (quote catch) ...)))",
+    "(catch2 (car (list 2 3)) (throw \"food\") (list 73 73 73))"
   };
   for (int i = 0; i < ARRAY_SIZE(test_strings); i++) {
     const char* test_string = test_strings[i];
     Lips_Cell evaluated_string = Lips_EvalString(interp, test_string, NULL);
-    Lips_PrintCell(interp, evaluated_string, buff, sizeof(buff));
-    printf("Test %d: %s -> %s\n", i, test_string, buff);
+    if (evaluated_string == NULL) {
+      printf("Test %d: %s FAILED unhandled exception '%s'\n", i, test_string, Lips_GetError(interp));
+    } else {
+      Lips_PrintCell(interp, evaluated_string, buff, sizeof(buff));
+      printf("Test %d: %s -> %s\n", i, test_string, buff);
+    }
   }
 
   Lips_DestroyInterpreter(interp);
