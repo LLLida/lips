@@ -46,3 +46,10 @@ Library initialization should look like this:
 ** Docstrings
 
 Do we really need them?
+
+** Syntactic sugar
+
+#+begin_src emacs-lisp
+  (quote something) -> 'something
+  (lambda (a) $car (list a 7 6 5)) -> (lambda (a) (car (list a 7 6 5)))
+#+end_src
