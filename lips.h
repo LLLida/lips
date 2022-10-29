@@ -91,6 +91,12 @@ enum {
   LIPS_NUM_ARGS_VAR = 128
 };
 
+typedef struct {
+  uint32_t allocated_bytes;
+  uint32_t cell_bytes;
+  uint32_t str_bytes;
+} Lips_MemoryStats;
+
 /* Create a Lisp interpreter.
    @param alloc function that will be used by interpreter for memory allocation
    @param dealloc function that will be used by interpreter for memory deallocation
@@ -164,6 +170,8 @@ Lips_Cell Lips_Invoke(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Ce
 
 const char* Lips_SetError(Lips_Interpreter* interpreter, const char* fmt, ...);
 
+void Lips_CalculateMemoryStats(Lips_Interpreter* interpreter, Lips_MemoryStats* stats);
+
 #define Lips_IsInteger(cell) (Lips_GetType(cell) & LIPS_TYPE_INTEGER)
 #define Lips_IsReal(cell) (Lips_GetType(cell) & LIPS_TYPE_REAL)
 #define Lips_IsString(cell) (Lips_GetType(cell) & LIPS_TYPE_STRING)
@@ -172,7 +180,7 @@ const char* Lips_SetError(Lips_Interpreter* interpreter, const char* fmt, ...);
 #define Lips_IsEnv(cell) (Lips_GetType(cell) & LIPS_TYPE_ENV)
 #define Lips_IsFunction(cell) (Lips_GetType(cell) & LIPS_TYPE_FUNCTION)
 #define Lips_IsMacro(cell) (Lips_GetType(cell) & LIPS_TYPE_MACRO)
-  
+
 #define LIPS_THROW_ERROR(interpreter, ...) do {\
   Lips_SetError(interpreter, ##__VA_ARGS__);   \
   return NULL;                                 \

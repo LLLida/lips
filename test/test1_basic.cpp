@@ -99,6 +99,11 @@ int main(int argc, char** argv) {
     }
   }
 
+  Lips_MemoryStats memoryStats;
+  Lips_CalculateMemoryStats(interp, &memoryStats);
+  printf("MemoryStats: {allocated=%u, cells=%u, str=%u}\n",
+         memoryStats.allocated_bytes, memoryStats.cell_bytes, memoryStats.str_bytes);
+
   Lips_DestroyInterpreter(interp);
   return 0;
 }

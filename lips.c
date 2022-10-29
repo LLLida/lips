@@ -47,7 +47,7 @@ typedef struct EvalState EvalState;
 #define TYPE_CHECK_FORCED(type, cell) do {                              \
     assert((GET_TYPE(cell) & (type)) && "Typecheck failed"); \
   } while (0)
-#define GET_STR(cell) (cell->data.str)
+#define GET_STR(cell) ((cell)->data.str)
 
 
 /// LIST OF FUNCTIONS
@@ -1008,6 +1008,32 @@ Lips_SetError(Lips_Interpreter* interpreter, const char* fmt, ...)
   va_end(ap);
   interpreter->throwvalue = Lips_NewStringN(interpreter, interpreter->errbuff, len);
   return interpreter->errbuff;
+}
+
+void
+Lips_CalculateMemoryStats(Lips_Interpreter* interpreter, Lips_MemoryStats* stats)
+{
+  stats->allocated_bytes = 0;
+  stats->cell_bytes = 0;
+  stats->str_bytes = 0;
+
+  stats->allocated_bytes += sizeof(Lips_Interpreter);
+  stats->allocated_bytes += sizeof(Bucket) * interpreter->allocbuckets;
+  stats->allocated_bytes += interpreter->stack.size;
+  for (uint32_t i = 0; i < interpreter->numbuckets; i++) {
+    Bucket* bucket = &interpreter->buckets[i];
+    stats->allocated_bytes += bucket->size * sizeof(Lips_Value);
+    for (uint32_t i = 0, n = bucket->size; n > 0; i++) {
+      uint32_t mask = *(uint32_t*)&bucket->data[i];
+      if (mask ^ DEAD_MASK) {
+        stats->cell_bytes += sizeof(Lips_Value);
+        if (bucket->data[i].type & (LIPS_TYPE_STRING|LIPS_TYPE_SYMBOL)) {
+          stats->str_bytes += GET_STR(&bucket->data[i])->length;
+        }
+        n--;
+      }
+    }
+  }
 }
 
 int64_t
