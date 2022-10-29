@@ -62,6 +62,8 @@ static void StringSet(Lips_AllocFunc alloc, StringData* str, uint32_t index, cha
 static StringData* StringCopy(StringData* src);
 static int StringEqual(const StringData* lhs, const StringData* rhs);
 
+const char* GDB_lips_to_c_string(Lips_Interpreter* interp, Lips_Cell cell);
+
 static void ParserInit(Parser* parser, const char* str, uint32_t len);
 static int ParserNextToken(Parser* parser);
 static int Lips_IsTokenNumber(const Token* token);
@@ -137,6 +139,7 @@ static LIPS_DECLARE_MACRO(progn);
 static LIPS_DECLARE_MACRO(if);
 static LIPS_DECLARE_MACRO(when);
 static LIPS_DECLARE_MACRO(catch);
+static LIPS_DECLARE_MACRO(intern);
 // TODO: implement cond
 /* static LIPS_DECLARE_MACRO(cond); */
 
@@ -349,6 +352,7 @@ Lips_CreateInterpreter(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc)
   LIPS_DEFINE_MACRO(interp, if, LIPS_NUM_ARGS_3|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(interp, when, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(interp, catch, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_MACRO(interp, intern, LIPS_NUM_ARGS_1, NULL);
 
   interp->T_integer  = Lips_NewSymbol(interp, "integer");
   interp->T_real     = Lips_NewSymbol(interp, "real");
@@ -793,7 +797,7 @@ Lips_PrintCell(Lips_Interpreter* interpreter, Lips_Cell cell, char* buff, uint32
         prev--;
         counter--;
         if (cell == NULL) {
-          PRINT(")");
+          goto skip;
         } else {
           PRINT(" ");
         }
@@ -1191,6 +1195,15 @@ StringEqual(const StringData* lhs, const StringData* rhs)
     }
   }
   return 0;
+}
+
+const char*
+GDB_lips_to_c_string(Lips_Interpreter* interp, Lips_Cell cell)
+{
+  // FIXME: this is terrible
+  char* buff = interp->errbuff + 512;
+  Lips_PrintCell(interp, cell, buff, 512);
+  return buff;
 }
 
 void
@@ -2164,4 +2177,12 @@ LIPS_DECLARE_MACRO(catch)
   Lips_Cell ret = M_progn(interpreter, args, udata);
   PushCatch(interpreter);
   return ret;
+}
+
+LIPS_DECLARE_MACRO(intern)
+{
+  (void)udata;
+  TYPE_CHECK(interpreter, LIPS_TYPE_STRING|LIPS_TYPE_SYMBOL, GET_HEAD(args));
+  Lips_Cell cell = Lips_InternCell(interpreter, GET_HEAD(args));
+  return cell;
 }
