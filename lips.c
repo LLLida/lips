@@ -1072,27 +1072,45 @@ void
 Lips_CalculateMemoryStats(Lips_Interpreter* interpreter, Lips_MemoryStats* stats)
 {
   stats->allocated_bytes = 0;
-  stats->cell_bytes = 0;
-  stats->str_bytes = 0;
+  stats->cell_allocated_bytes = 0;
+  stats->cell_used_bytes = 0;
+  stats->str_allocated_bytes = 0;
+  stats->str_used_bytes = 0;
 
   stats->allocated_bytes += sizeof(Lips_Interpreter);
   stats->allocated_bytes += sizeof(Bucket) * interpreter->allocbuckets;
+  stats->allocated_bytes += sizeof(Bucket) * interpreter->allocstr_buckets;
   stats->allocated_bytes += interpreter->stack.size;
+
   for (uint32_t i = 0; i < interpreter->numbuckets; i++) {
     Bucket* bucket = &interpreter->buckets[i];
-    stats->allocated_bytes += bucket->size * sizeof(Lips_Value);
+    stats->cell_allocated_bytes += BUCKET_SIZE * sizeof(Lips_Value);
     Lips_Value* const data = bucket->data;
     for (uint32_t i = 0, n = bucket->size; n > 0; i++) {
       uint32_t mask = *(uint32_t*)&data[i];
       if (mask ^ DEAD_MASK) {
-        stats->cell_bytes += sizeof(Lips_Value);
-        if (data[i].type & (LIPS_TYPE_STRING|LIPS_TYPE_SYMBOL)) {
-          stats->str_bytes += GET_STR(&data[i])->length;
-        }
+        stats->cell_used_bytes += sizeof(Lips_Value);
         n--;
       }
     }
   }
+  for (uint32_t i = 0; i < interpreter->numstr_buckets; i++) {
+    Bucket* bucket = &interpreter->str_buckets[i];
+    stats->str_allocated_bytes += BUCKET_SIZE * sizeof(StringData);
+    StringData* const data = bucket->data;
+    for (uint32_t i = 0, n = bucket->size; n > 0; i++) {
+      uint32_t mask = *(uint32_t*)&data[i];
+      if (mask ^ DEAD_MASK) {
+        stats->str_used_bytes += sizeof(StringData);
+        n--;
+      }
+    }
+  }
+  for (uint32_t i = 0; i < interpreter->numchunks; i++) {
+    MemChunk* chunk = &interpreter->chunks[i];
+    stats->str_allocated_bytes += chunk->numbytes;
+  }
+  stats->allocated_bytes += stats->cell_allocated_bytes + stats->str_allocated_bytes;
 }
 
 int64_t

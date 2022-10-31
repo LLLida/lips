@@ -93,8 +93,10 @@ enum {
 
 typedef struct {
   uint32_t allocated_bytes;
-  uint32_t cell_bytes;
-  uint32_t str_bytes;
+  uint32_t cell_allocated_bytes;
+  uint32_t cell_used_bytes;
+  uint32_t str_allocated_bytes;
+  uint32_t str_used_bytes;
 } Lips_MemoryStats;
 
 /* Create a Lisp interpreter.
