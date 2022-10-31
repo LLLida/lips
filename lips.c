@@ -31,10 +31,13 @@ typedef struct Parser Parser;
 typedef struct StringData StringData;
 typedef struct Token Token;
 typedef struct EvalState EvalState;
+typedef struct MemChunk MemChunk;
+typedef struct FreeRegion FreeRegion;
 
 
 /// MACROS
 
+#define MAX_CHUNKS 16
 #define LIPS_EOF (-1)
 #define STACK_INVALID_POS ((uint32_t)-1)
 #define DEAD_MASK (1<<31)
@@ -48,6 +51,9 @@ typedef struct EvalState EvalState;
     assert((GET_TYPE(cell) & (type)) && "Typecheck failed"); \
   } while (0)
 #define GET_STR(cell) ((cell)->data.str)
+#define STR_PTR_CHUNK(interp, str) &(interp->chunks[str->flags & (MAX_CHUNKS-1)])
+#define STR_DATA_PTR(chunk, str) &(chunk)->data[str->ptr_offset]
+#define GET_STR_PTR(interp, cell) STR_DATA_PTR(STR_PTR_CHUNK(interp, (cell)->data.str), (cell)->data.str)
 
 
 /// LIST OF FUNCTIONS
@@ -56,14 +62,11 @@ static void* DefaultAlloc(size_t bytes);
 static void DefaultDealloc(void* ptr, size_t bytes);
 
 static Lips_Cell NewCell(Lips_Interpreter* interp) LIPS_HOT_FUNCTION;
-static void DestroyCell(Lips_Cell cell, Lips_DeallocFunc dealloc);
+static void DestroyCell(Lips_Interpreter* interpreter, Lips_Cell cell);
 
-static StringData* StringCreate(Lips_AllocFunc alloc);
-static void StringAllocate(StringData* str, Lips_AllocFunc alloc, const char* ptr, uint32_t n);
-static void StringDestroy(StringData* str, Lips_DeallocFunc dealloc);
-static void StringSet(Lips_AllocFunc alloc, StringData* str, uint32_t index, char c);
-static StringData* StringCopy(StringData* src);
-static int StringEqual(const StringData* lhs, const StringData* rhs);
+static StringData* StringCreate(Lips_Interpreter* interp, const char* str, uint32_t n);
+static void StringDestroy(Lips_Interpreter* interp, StringData* str);
+static int StringEqual(Lips_Interpreter* interpreter, const StringData* lhs, const StringData* rhs);
 
 const char* GDB_lips_to_c_string(Lips_Interpreter* interp, Lips_Cell cell);
 
@@ -73,10 +76,12 @@ static int Lips_IsTokenNumber(const Token* token);
 static Lips_Cell ParseNumber(Lips_Interpreter* interp, const Token* token);
 static Lips_Cell GenerateAST(Lips_Interpreter* interp, Parser* parser);
 
-static void CreateBucket(Lips_AllocFunc alloc, Bucket* bucket);
-static void DestroyBucket(Lips_DeallocFunc dealloc, Bucket* bucket);
+static void CreateBucket(Lips_AllocFunc alloc, Bucket* bucket, uint32_t elem_size);
+static void DestroyBucket(Lips_Interpreter* interpreter, Bucket* bucket, uint32_t elem_size);
 static Lips_Cell BucketNewCell(Bucket* bucket);
 static void BucketDeleteCell(Bucket* bucket, Lips_Cell cell);
+static StringData* BucketNewString(Bucket* bucket);
+static void BucketDeleteString(Bucket* bucket, StringData* string);
 
 static void CreateStack(Lips_AllocFunc alloc, Stack* stack, uint32_t size);
 static void DestroyStack(Lips_DeallocFunc dealloc, Stack* stack);
@@ -119,6 +124,11 @@ static int IteratorIsEmpty(const Iterator* it);
 static void IteratorGet(const Iterator* it, const char** key, Lips_Cell* value);
 static void IteratorNext(Iterator* it);
 
+static MemChunk* AddMemChunk(Lips_Interpreter* interpreter, uint32_t size);
+static void RemoveMemChunk(Lips_Interpreter* interpreter, uint32_t i);
+static char* ChunkFindSpace(MemChunk* chunk, uint32_t bytes);
+static void ChunkShrink(MemChunk* chunk);
+
 static void DefineWithCurrent(Lips_Interpreter* interpreter, Lips_Cell name, Lips_Cell value);
 static uint32_t CheckArgumentCount(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args);
 static void DefineArgumentList(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell argvalues);
@@ -151,10 +161,12 @@ static LIPS_DECLARE_MACRO(intern);
 
 // Copy-On-Write string
 struct StringData {
+  uint32_t ptr_offset;
+  // 0-3 bytes - chunk index
+  // 4-31 bytes - bucket index
+  uint32_t flags;
   uint32_t length;
-  uint32_t counter;
   uint32_t hash;
-  char* ptr;
 };
 
 struct HashTable {
@@ -236,7 +248,7 @@ struct Node {
 #define NODE_VALID(node) ((node).value != NULL)
 
 struct Bucket {
-  Lips_Value* data;
+  void* data;
   uint32_t size;
   uint32_t next;
 };
@@ -279,6 +291,20 @@ struct EvalState {
 #define ES_CODE(es) (es)->data.exec.code
 #define ES_CATCH_PARENT(es) (es)->data.exec.parent
 
+struct FreeRegion {
+  char* data;
+  uint32_t size;
+};
+
+#define STRINGS_IN_CHUNK 128
+struct MemChunk {
+  char* data;
+  uint32_t numbytes;
+  uint32_t occupied;
+  FreeRegion regions[STRINGS_IN_CHUNK];
+  uint32_t numregions;
+};
+
 struct Parser {
   const char* text;
   uint32_t length;
@@ -292,14 +318,22 @@ struct Parser {
 struct Lips_Interpreter {
   Lips_AllocFunc alloc;
   Lips_DeallocFunc dealloc;
+  // pools for cells
   Bucket* buckets;
   uint32_t numbuckets;
   uint32_t allocbuckets;
+  // pools for string objects
+  Bucket* str_buckets;
+  uint32_t numstr_buckets;
+  uint32_t allocstr_buckets;
+  MemChunk chunks[MAX_CHUNKS];
+  uint32_t numchunks;
   Stack stack;
   uint32_t envpos;
   uint32_t evalpos;
   uint32_t catchpos;
   Lips_Cell throwvalue;
+  Lips_Cell default_file;
   Lips_Cell S_nil;
   Lips_Cell S_t;
   Lips_Cell S_filename;
@@ -327,6 +361,11 @@ Lips_CreateInterpreter(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc)
   interp->numbuckets = 0;
   interp->buckets = (Bucket*)alloc(sizeof(Bucket));
   interp->allocbuckets = 1;
+  interp->numchunks = 0;
+  AddMemChunk(interp, 1024);
+  interp->str_buckets = (Bucket*)alloc(sizeof(Bucket));
+  interp->allocstr_buckets = 1;
+  interp->numstr_buckets = 0;
   CreateStack(alloc, &interp->stack, 16*1024);
   HashTable* env = HashTableCreate(interp->alloc, interp->dealloc, &interp->stack);
   env->parent = STACK_INVALID_POS;
@@ -334,6 +373,7 @@ Lips_CreateInterpreter(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc)
   interp->evalpos = STACK_INVALID_POS;
   interp->catchpos = STACK_INVALID_POS;
   // define builtins
+  interp->default_file = Lips_NewString(interp, "<eval>");
   interp->S_nil = Lips_Define(interp, "nil", Lips_NewPair(interp, NULL, NULL));
   interp->S_t = Lips_Define(interp, "t", Lips_NewInteger(interp, 1));
   interp->S_filename = Lips_NewPair(interp, NULL, NULL);
@@ -382,9 +422,25 @@ Lips_DestroyInterpreter(Lips_Interpreter* interpreter)
   // clear all resources
   Lips_DeallocFunc dealloc = interpreter->dealloc;
   DestroyStack(dealloc, &interpreter->stack);
-  for (uint32_t i = 0; i < interpreter->numbuckets; i++)
-    DestroyBucket(dealloc, &interpreter->buckets[i]);
+  for (uint32_t i = 0; i < interpreter->numbuckets; i++) {
+    // destroy each cell in bucket
+    Bucket* bucket = &interpreter->buckets[i];
+    for (uint32_t i = 0; bucket->size > 0; i++) {
+      Lips_Cell cell = (Lips_Value*)bucket->data + i;
+      if ((cell->type & DEAD_MASK) == 0) {
+        DestroyCell(interpreter, cell);
+        bucket->size--;
+      }
+    }
+    DestroyBucket(interpreter, bucket, sizeof(Lips_Value));
+  }
+  for (uint32_t i = 0; i < interpreter->numstr_buckets; i++)
+    DestroyBucket(interpreter, &interpreter->str_buckets[i], sizeof(StringData));
+  for (uint32_t i = interpreter->numchunks; i > 0; i--) {
+    RemoveMemChunk(interpreter, i-1);
+  }
   dealloc(interpreter->buckets, sizeof(Bucket) * interpreter->allocbuckets);
+  dealloc(interpreter->str_buckets, sizeof(Bucket) * interpreter->allocstr_buckets);
   dealloc(interpreter, sizeof(Lips_Interpreter));
 }
 
@@ -434,7 +490,7 @@ Lips_Eval(Lips_Interpreter* interp, Lips_Cell cell)
       }
       state->callable = Lips_InternCell(interp, name);
       if (LIPS_UNLIKELY(state->callable == interp->S_nil)) {
-        Lips_SetError(interp, "Eval: undefined symbol '%s'", GET_STR(name)->ptr);
+        Lips_SetError(interp, "Eval: undefined symbol '%s'", GET_STR_PTR(interp, name));
         goto except;
       }
       ES_ARG_COUNT(state) = CheckArgumentCount(interp, state->callable, state->passed_args);
@@ -551,8 +607,12 @@ Lips_EvalString(Lips_Interpreter* interpreter, const char* str, const char* file
   Parser parser;
   ParserInit(&parser, str, strlen(str));
   Lips_Cell ast = GenerateAST(interpreter, &parser);
-  if (filename == NULL) filename = "<eval>";
-  Lips_Cell str_filename = Lips_NewString(interpreter, filename);
+  Lips_Cell str_filename;
+  if (filename == NULL)  {
+    str_filename = interpreter->default_file;
+  } else {
+    str_filename = Lips_NewString(interpreter, filename);
+  }
   Lips_Cell temp = Lips_ListPushBack(interpreter, interpreter->S_filename, str_filename);
   Lips_Cell ret = Lips_Eval(interpreter, ast);
   GET_TAIL(temp) = NULL; // this equals to Lips_ListPop(interpreter, interpreter->S_filename);
@@ -607,8 +667,7 @@ Lips_NewStringN(Lips_Interpreter* interpreter, const char* str, uint32_t n)
 {
   Lips_Cell cell = NewCell(interpreter);
   cell->type = LIPS_TYPE_STRING;
-  GET_STR(cell) = StringCreate(interpreter->alloc);
-  StringAllocate(GET_STR(cell), interpreter->alloc, str, n);
+  GET_STR(cell) = StringCreate(interpreter, str, n);
   return cell;
 }
 
@@ -623,8 +682,7 @@ Lips_NewSymbolN(Lips_Interpreter* interpreter, const char* str, uint32_t n)
 {
   Lips_Cell cell = NewCell(interpreter);
   cell->type = LIPS_TYPE_SYMBOL;
-  GET_STR(cell) = StringCreate(interpreter->alloc);
-  StringAllocate(GET_STR(cell), interpreter->alloc, str, n);
+  GET_STR(cell) = StringCreate(interpreter, str, n);
   return cell;
 }
 
@@ -754,10 +812,10 @@ Lips_PrintCell(Lips_Interpreter* interpreter, Lips_Cell cell, char* buff, uint32
           PRINT("%f", GET_REAL(GET_HEAD(cell)));
           break;
         case LIPS_TYPE_STRING:
-          PRINT("\"%s\"", GET_STRING(GET_HEAD(cell)));
+          PRINT("\"%s\"", GET_STR_PTR(interpreter, GET_HEAD(cell)));
           break;
         case LIPS_TYPE_SYMBOL:
-          PRINT("%s", GET_STRING(GET_HEAD(cell)));
+          PRINT("%s", GET_STR_PTR(interpreter, GET_HEAD(cell)));
           break;
         case LIPS_TYPE_PAIR:
           PRINT("(");
@@ -818,10 +876,10 @@ Lips_PrintCell(Lips_Interpreter* interpreter, Lips_Cell cell, char* buff, uint32
       PRINT("%f", GET_REAL(cell));
       break;
     case LIPS_TYPE_STRING:
-      PRINT("\"%s\"", GET_STRING(cell));
+      PRINT("\"%s\"", GET_STR_PTR(interpreter, cell));
       break;
     case LIPS_TYPE_SYMBOL:
-      PRINT("%s", GET_STRING(cell));
+      PRINT("%s", GET_STR_PTR(interpreter, cell));
       break;
     case LIPS_TYPE_FUNCTION:
     case LIPS_TYPE_C_FUNCTION: {
@@ -954,7 +1012,7 @@ Lips_DefineCell(Lips_Interpreter* interpreter, Lips_Cell cell, Lips_Cell value)
   }
   Lips_Cell* ptr = HashTableInsertWithHash(interpreter->alloc, interpreter->dealloc,
                                            &interpreter->stack, env,
-                                           GET_STR(cell)->hash, GET_STR(cell)->ptr, value);
+                                           GET_STR(cell)->hash, GET_STR_PTR(interpreter, cell), value);
   if (ptr == NULL) {
     LIPS_THROW_ERROR(interpreter, "Value '%s' is already defined");
   }
@@ -981,7 +1039,7 @@ Lips_InternCell(Lips_Interpreter* interpreter, Lips_Cell cell)
   TYPE_CHECK(interpreter, LIPS_TYPE_SYMBOL|LIPS_TYPE_STRING, cell);
   HashTable* env = InterpreterEnv(interpreter);
   do {
-    Lips_Cell* ptr = HashTableSearchWithHash(env, GET_STR(cell)->hash, GET_STR(cell)->ptr);
+    Lips_Cell* ptr = HashTableSearchWithHash(env, GET_STR(cell)->hash, GET_STR_PTR(interpreter, cell));
     if (ptr) {
       return *ptr;
     }
@@ -1023,12 +1081,13 @@ Lips_CalculateMemoryStats(Lips_Interpreter* interpreter, Lips_MemoryStats* stats
   for (uint32_t i = 0; i < interpreter->numbuckets; i++) {
     Bucket* bucket = &interpreter->buckets[i];
     stats->allocated_bytes += bucket->size * sizeof(Lips_Value);
+    Lips_Value* const data = bucket->data;
     for (uint32_t i = 0, n = bucket->size; n > 0; i++) {
-      uint32_t mask = *(uint32_t*)&bucket->data[i];
+      uint32_t mask = *(uint32_t*)&data[i];
       if (mask ^ DEAD_MASK) {
         stats->cell_bytes += sizeof(Lips_Value);
-        if (bucket->data[i].type & (LIPS_TYPE_STRING|LIPS_TYPE_SYMBOL)) {
-          stats->str_bytes += GET_STR(&bucket->data[i])->length;
+        if (data[i].type & (LIPS_TYPE_STRING|LIPS_TYPE_SYMBOL)) {
+          stats->str_bytes += GET_STR(&data[i])->length;
         }
         n--;
       }
@@ -1057,7 +1116,7 @@ Lips_GetString(Lips_Interpreter* interpreter, Lips_Cell cell)
 {
   (void)interpreter;
   TYPE_CHECK(interpreter, LIPS_TYPE_STRING|LIPS_TYPE_SYMBOL, cell);
-  return GET_STRING(cell);
+  return GET_STR_PTR(interpreter, cell);
 }
 
 Lips_Cell
@@ -1090,7 +1149,7 @@ DefaultDealloc(void* ptr, size_t bytes)
 }
 
 void
-DestroyCell(Lips_Cell cell, Lips_DeallocFunc dealloc) {
+DestroyCell(Lips_Interpreter* interpreter, Lips_Cell cell) {
   switch (GET_TYPE(cell)) {
   default: assert(0 && "internal error: destroy_cell: faced undefined type of cell");
   case LIPS_TYPE_INTEGER:
@@ -1103,7 +1162,7 @@ DestroyCell(Lips_Cell cell, Lips_DeallocFunc dealloc) {
     break;
   case LIPS_TYPE_STRING:
   case LIPS_TYPE_SYMBOL:
-    StringDestroy(GET_STR(cell), dealloc);
+    StringDestroy(interpreter, GET_STR(cell));
     break;
   case LIPS_TYPE_PAIR:
 
@@ -1112,66 +1171,102 @@ DestroyCell(Lips_Cell cell, Lips_DeallocFunc dealloc) {
 }
 
 StringData*
-StringCreate(Lips_AllocFunc alloc)
+StringCreate(Lips_Interpreter* interp, const char* str, uint32_t n)
 {
-  StringData* str;
-  str = (StringData*)alloc(sizeof(StringData));
-  str->length = 0;
-  str->counter = 0;
-  str->ptr = NULL;
-  return str;
-}
-
-void
-StringAllocate(StringData* str, Lips_AllocFunc alloc, const char* ptr, uint32_t n)
-{
-  str->length = n;
-  str->counter = 1;
-  str->ptr = (char*)alloc(n+1);
-  str->ptr[n] = '\0';
-  strncpy(str->ptr, ptr, n);
-  str->hash = ComputeHash(str->ptr);
-}
-
-void
-StringDestroy(StringData* str, Lips_DeallocFunc dealloc)
-{
-  if (str->counter == 1) {
-    dealloc(str->ptr, str->length + 1);
-    // TODO: proper string allocations
-    dealloc(str, sizeof(StringData));
-  } else {
-    str->counter--;
+  StringData* data = NULL;
+  for (uint32_t i = interp->numstr_buckets; i > 0; i--)
+    if (interp->str_buckets[i-1].size < BUCKET_SIZE) {
+      // we found a bucket with available storage, use it
+      data = BucketNewString(&interp->str_buckets[i-1]);
+      data->flags = (i-1) << 4;
+    }
+  if (data == NULL) {
+    if (interp->numstr_buckets == interp->allocstr_buckets) {
+      // we're out of storage for buckets, allocate more
+      Bucket* new_buckets = interp->alloc(interp->allocstr_buckets * 2);
+      assert(new_buckets);
+      memcpy(new_buckets, interp->str_buckets, interp->numstr_buckets * sizeof(Bucket));
+      interp->str_buckets = new_buckets;
+      interp->dealloc(new_buckets, sizeof(Bucket) * interp->allocstr_buckets);
+      interp->allocstr_buckets = interp->allocstr_buckets * 2;
+    }
+    Bucket* new_bucket = &interp->str_buckets[interp->numstr_buckets];
+    CreateBucket(interp->alloc, new_bucket, sizeof(StringData));
+    data = BucketNewString(new_bucket);
+    data->flags = (interp->numstr_buckets) << 4;
+    interp->numstr_buckets++;
   }
+  MemChunk* chunk = NULL;
+  for (uint32_t i = 0; i < interp->numchunks; i++) {
+    if (interp->chunks[i].numbytes - interp->chunks[i].occupied >= n+1) {
+      chunk = &interp->chunks[i];
+      break;
+    }
+  }
+  if (chunk == NULL) {
+    uint32_t sz = (n < 1024) ? 1024 : n;
+    if (interp->numchunks < MAX_CHUNKS) {
+      chunk = AddMemChunk(interp, sz);
+    } else {
+      chunk = &interp->chunks[0];
+      for (uint32_t i = 1; i < interp->numchunks; i++) {
+        if (interp->chunks[i].numbytes < chunk->numbytes) {
+          chunk = &interp->chunks[i];
+        }
+      }
+      char* new_data = interp->alloc(chunk->numbytes + sz);
+      assert(new_data);
+      memcpy(new_data, chunk->data, chunk->numbytes);
+      chunk->data = new_data;
+      FreeRegion* region = &chunk->regions[chunk->numregions++];
+      region->data = chunk->data + chunk->numbytes;
+      region->size = sz;
+    }
+  }
+  data->flags |= chunk - interp->chunks;
+  char* ptr = ChunkFindSpace(chunk, n+1);
+  data->ptr_offset = ptr - chunk->data;
+  data->length = n;
+  strncpy(ptr, str, n);
+  ptr[n] = '\0';
+  data->hash = ComputeHash(ptr);
+  return data;
 }
 
 void
-StringSet(Lips_AllocFunc alloc, StringData* str, uint32_t index, char c)
+StringDestroy(Lips_Interpreter* interp, StringData* str)
 {
-  if (str->counter > 1) {
-    // create a new string object
-    StringData* newstr = StringCreate(alloc);
-    StringAllocate(newstr, alloc, str->ptr, str->length);
-    str = newstr;
+  MemChunk* chunk = &interp->chunks[str->flags & (MAX_CHUNKS-1)];
+  char* ptr = STR_DATA_PTR(chunk, str);
+  for (uint32_t i = 0; i < interp->numchunks; i++) {
+    MemChunk* tmp = &interp->chunks[i];
+    if (ptr >= tmp->data &&
+        ptr < tmp->data + tmp->numbytes) {
+      chunk = tmp;
+      break;
+    }
   }
-  assert(index < str->length && "string_set: index out of bounds");
-  str->ptr[index] = c;
-}
-
-StringData*
-StringCopy(StringData* src)
-{
-  // copies are very cheap, because we don't actually do copies
-  src->counter += 1;
-  return src;
+  assert(chunk);
+  if (chunk->numregions == STRINGS_IN_CHUNK) {
+    ChunkShrink(chunk);
+  }
+  FreeRegion* region = &chunk->regions[chunk->numregions];
+  region->data = ptr;
+  region->size = str->length+1;
+  chunk->numregions++;
+  chunk->occupied -= region->size;
+  Bucket* bucket = &interp->str_buckets[str->flags >> 4];
+  BucketDeleteString(bucket, str);
 }
 
 int
-StringEqual(const StringData* lhs, const StringData* rhs)
+StringEqual(Lips_Interpreter* interpreter, const StringData* lhs, const StringData* rhs)
 {
   if (lhs->hash == rhs->hash) {
     if (lhs->length == rhs->length) {
-      if (strcmp(lhs->ptr, rhs->ptr) == 0)
+      char* ptr1 = STR_DATA_PTR(&interpreter->chunks[lhs->flags & (MAX_CHUNKS-1)], lhs);
+      char* ptr2 = STR_DATA_PTR(&interpreter->chunks[rhs->flags & (MAX_CHUNKS-1)], rhs);
+      if (strcmp(ptr1, ptr2) == 0)
         return 1;
     }
   }
@@ -1318,7 +1413,7 @@ NewCell(Lips_Interpreter* interp)
   }
   // push back a new bucket
   Bucket* new_bucket = &interp->buckets[interp->numbuckets];
-  CreateBucket(interp->alloc, new_bucket);
+  CreateBucket(interp->alloc, new_bucket, sizeof(Lips_Value));
   interp->numbuckets++;
   return BucketNewCell(new_bucket);
 }
@@ -1452,37 +1547,31 @@ GenerateAST(Lips_Interpreter* interpreter, Parser* parser)
 }
 
 void
-CreateBucket(Lips_AllocFunc alloc, Bucket* bucket)
+CreateBucket(Lips_AllocFunc alloc, Bucket* bucket, uint32_t elem_size)
 {
   uint32_t i;
-  bucket->data = (Lips_Value*)alloc(BUCKET_SIZE * sizeof(Lips_Value));
+  bucket->data = (Lips_Value*)alloc(BUCKET_SIZE * elem_size);
   bucket->size = 0;
   bucket->next = 0;
+  uint8_t* data = bucket->data;
   for (i = 0; i < BUCKET_SIZE; i++) {
-    *(uint32_t*)&bucket->data[i] = (i + 1) | DEAD_MASK;
+    *(uint32_t*)data = (i + 1) | DEAD_MASK;
+    data += elem_size;
   }
 }
 
 void
-DestroyBucket(Lips_DeallocFunc dealloc, Bucket* bucket)
+DestroyBucket(Lips_Interpreter* interpreter, Bucket* bucket, uint32_t elem_size)
 {
-  // destroy each cell in bucket
-  for (uint32_t i = 0; bucket->size > 0; i++) {
-    Lips_Cell cell = bucket->data + i;
-    if ((cell->type & DEAD_MASK) == 0) {
-      DestroyCell(cell, dealloc);
-      bucket->size--;
-    }
-  }
   // free bucket's memory
-  dealloc(bucket->data, sizeof(Lips_Value) * BUCKET_SIZE);
+  interpreter->dealloc(bucket->data, elem_size * BUCKET_SIZE);
 }
 
 Lips_Cell
 BucketNewCell(Bucket* bucket)
 {
   assert(bucket->size < BUCKET_SIZE && "Bucket out of space");
-  Lips_Cell ret = &bucket->data[bucket->next];
+  Lips_Cell ret = (Lips_Cell)bucket->data + bucket->next;
   bucket->next = *(uint32_t*)ret ^ DEAD_MASK;
   bucket->size++;
   return ret;
@@ -1491,10 +1580,31 @@ BucketNewCell(Bucket* bucket)
 void
 BucketDeleteCell(Bucket* bucket, Lips_Cell cell)
 {
-  uint32_t index = cell - bucket->data;
+  uint32_t index = cell - (Lips_Cell)bucket->data;
   assert(index < BUCKET_SIZE && "cell doesn't belong to this Bucket");
   assert(bucket->size > 0 && "Bucket is empty");
   *(uint32_t*)cell = bucket->next | DEAD_MASK;
+  bucket->next = index;
+  bucket->size--;
+}
+
+StringData*
+BucketNewString(Bucket* bucket)
+{
+  assert(bucket->size < BUCKET_SIZE && "Bucket out of space");
+  StringData* ret = (StringData*)bucket->data + bucket->next;
+  bucket->next = *(uint32_t*)ret ^ DEAD_MASK;
+  bucket->size++;
+  return ret;
+}
+
+void
+BucketDeleteString(Bucket* bucket, StringData* string)
+{
+  uint32_t index = string - (StringData*)bucket->data;
+  assert(index < BUCKET_SIZE && "cell doesn't belong to this Bucket");
+  assert(bucket->size > 0 && "Bucket is empty");
+  *(uint32_t*)string = bucket->next | DEAD_MASK;
   bucket->next = index;
   bucket->size--;
 }
@@ -1821,6 +1931,99 @@ uint32_t GetRealNumargs(Lips_Interpreter* interpreter, Lips_Cell callable)
   return (GET_NUMARGS(callable) & 127) + (GET_NUMARGS(callable) >> 7);
 }
 
+MemChunk*
+AddMemChunk(Lips_Interpreter* interpreter, uint32_t size)
+{
+  assert(interpreter->numchunks < MAX_CHUNKS);
+  MemChunk* chunk = &interpreter->chunks[interpreter->numchunks];
+  chunk->data = interpreter->alloc(size);
+  chunk->numbytes = size;
+  chunk->occupied = 0;
+  chunk->numregions = 1;
+  chunk->regions[0].data = chunk->data;
+  chunk->regions[0].size = size;
+  interpreter->numchunks++;
+  return chunk;
+}
+
+void
+RemoveMemChunk(Lips_Interpreter* interpreter, uint32_t i)
+{
+  MemChunk* chunk = &interpreter->chunks[i];
+  assert(chunk->occupied == 0);
+  interpreter->dealloc(chunk->data, chunk->numbytes);
+  if (i != interpreter->numchunks-1) {
+    // swap with last place
+    memcpy(&interpreter->chunks[i], &interpreter->chunks[interpreter->numchunks-1], sizeof(MemChunk));
+  }
+  interpreter->numchunks--;
+}
+
+char*
+ChunkFindSpace(MemChunk* chunk, uint32_t bytes)
+{
+  FreeRegion* region = NULL;
+  // find a region which size differs from 'bytes' the least
+  for (uint32_t i = chunk->numregions; i > 0; i--) {
+    if (region == NULL ||
+        (chunk->regions[i-1].size - bytes) < (region->size - bytes)) {
+      region = &chunk->regions[i-1];
+      if (region->size - bytes == 0)
+        break;
+    }
+  }
+  if (region == NULL) {
+    //TODO: avoid fragmentation
+    ChunkShrink(chunk);
+    assert(0);
+  }
+  char* ret = region->data;
+  if (region->size == bytes) {
+    if (region - chunk->regions != chunk->numregions-1) {
+      memcpy(region, &chunk->regions[chunk->numregions-1], sizeof(FreeRegion));
+    }
+    chunk->numregions--;
+  } else {
+    region->size -= bytes;
+    region->data += bytes;
+  }
+  chunk->occupied += bytes;
+  return ret;
+}
+
+void ChunkShrink(MemChunk* chunk)
+{
+  // sort regions using insertion sort(works very well on almost sorted arrays)
+  for (uint32_t i = 1; i < chunk->numregions; i++) {
+    int j = i-1;
+    char* R = chunk->regions[i].data;
+    while (j >= 0 && R <= chunk->regions[j].data) {
+      memcpy(&chunk->regions[j+1], &chunk->regions[j], sizeof(FreeRegion));
+      j--;
+    }
+    memcpy(&chunk->regions[j+1], &chunk->regions[i], sizeof(FreeRegion));
+  }
+  // merge regions
+  for (uint32_t i = chunk->numregions; i > 0; i--) {
+    FreeRegion* region = &chunk->regions[i-1];
+    uint32_t size = region->size;
+    while (region->data - region->size == (region-1)->data) {
+      region--;
+      size += region->size;
+    }
+    int diff = region->data - chunk->regions[i-1].data;
+    if (diff > 0) {
+      chunk->regions[i-1-diff].size = size;
+      // move regions left
+      for (uint32_t j = i-diff; j < chunk->numregions-diff; j++) {
+        memcpy(&chunk->regions[j], &chunk->regions[j+diff], sizeof(FreeRegion));
+      }
+      chunk->numregions -= diff;
+      i -= diff;
+    }
+  }
+}
+
 void
 DefineWithCurrent(Lips_Interpreter* interpreter, Lips_Cell name, Lips_Cell value)
 {
@@ -1829,7 +2032,7 @@ DefineWithCurrent(Lips_Interpreter* interpreter, Lips_Cell name, Lips_Cell value
   HashTable* env = InterpreterEnv(interpreter);
   Lips_Cell* ptr = HashTableInsertWithHash(interpreter->alloc, interpreter->dealloc,
                                            &interpreter->stack, env,
-                                           GET_STR(name)->hash, GET_STR(name)->ptr, value);
+                                           GET_STR(name)->hash, GET_STR_PTR(interpreter, name), value);
   assert(ptr && "Internal error(value is already defined)");
 }
 
@@ -1965,7 +2168,7 @@ LIPS_DECLARE_FUNCTION(equal)
           continue;
       } else if (GET_TYPE(lhs) == LIPS_TYPE_STRING ||
                  GET_TYPE(lhs) == LIPS_TYPE_SYMBOL) {
-        if (StringEqual(GET_STR(lhs), GET_STR(rhs)))
+        if (StringEqual(interpreter, GET_STR(lhs), GET_STR(rhs)))
           continue;
       } else if (GET_TYPE(lhs) == LIPS_TYPE_PAIR) {
         // FIXME: this should definitely look nicer but for now it works
@@ -2090,7 +2293,7 @@ LIPS_DECLARE_MACRO(lambda)
     LIPS_THROW_ERROR(interpreter,
                      "Too many arguments(%u), in Lips language callables have up to 127 named arguments", len);
   }
-  if (last && Lips_IsSymbol(last) && strcmp(GET_STR(last)->ptr, "...") == 0) {
+  if (last && Lips_IsSymbol(last) && strcmp(GET_STR_PTR(interpreter, last), "...") == 0) {
     len--;
     len |= LIPS_NUM_ARGS_VAR;
   }
@@ -2108,7 +2311,7 @@ LIPS_DECLARE_MACRO(macro)
     LIPS_THROW_ERROR(interpreter,
                     "Too many arguments(%u), in Lips language callables have up to 127 named arguments", len);
   }
-  if (last && Lips_IsSymbol(last) && strcmp(GET_STR(last)->ptr, "...") == 0) {
+  if (last && Lips_IsSymbol(last) && strcmp(GET_STR_PTR(interpreter, last), "...") == 0) {
     len--;
     len |= LIPS_NUM_ARGS_VAR;
   }
