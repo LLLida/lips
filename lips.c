@@ -1828,7 +1828,8 @@ HashTableInsert(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* stack,
 Lips_Cell*
 HashTableInsertWithHash(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* stack,
                         HashTable* ht, uint32_t hash,
-                        const char* key, Lips_Cell value) {
+                        const char* key, Lips_Cell value)
+{
   assert(value && "Can not insert null");
   if (HASH_TABLE_GET_SIZE(ht) == ht->allocated) {
     uint32_t sz = (HASH_TABLE_GET_SIZE(ht) == 0) ? 1 : (HASH_TABLE_GET_SIZE(ht)<<1);
@@ -1891,18 +1892,21 @@ HashTableIterate(HashTable* ht, Iterator* it) {
 }
 
 int
-IteratorIsEmpty(const Iterator* it) {
+IteratorIsEmpty(const Iterator* it)
+{
   return it->size == 0;
 }
 
 void
-IteratorGet(const Iterator* it, const char** key, Lips_Cell* value) {
+IteratorGet(const Iterator* it, const char** key, Lips_Cell* value)
+{
   *key = it->node->key;
   *value  = it->node->value;
 }
 
 void
-IteratorNext(Iterator* it) {
+IteratorNext(Iterator* it)
+{
   assert(it->size > 0);
   it->node++;
   if (it->size > 1) {
