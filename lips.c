@@ -57,6 +57,9 @@ typedef struct FreeRegion FreeRegion;
 #define STR_DATA_MAKE_CHUNK_INDEX(id) ((id) & 15)
 #define STR_PTR_CHUNK(interp, str) &(interp->chunks[STR_DATA_CHUNK_INDEX(str)])
 #define STR_DATA_PTR(chunk, str) &(chunk)->data[str->ptr_offset]
+#define STR_DATA_LENGTH(str) ((str)->length & ((1<<16)-1))
+#define STR_DATA_ALLOCATED(str) (((str)->length >> 16) + STR_DATA_LENGTH(str))
+#define STR_DATA_MAKE_LEN(n, alloc) ((n) | ((alloc) << 16))
 #define GET_STR_PTR(interp, cell) STR_DATA_PTR(STR_PTR_CHUNK(interp, (cell)->data.str), (cell)->data.str)
 
 
@@ -132,6 +135,8 @@ static MemChunk* AddMemChunk(Lips_Interpreter* interpreter, uint32_t size);
 static void RemoveMemChunk(Lips_Interpreter* interpreter, uint32_t i);
 static char* ChunkFindSpace(MemChunk* chunk, uint32_t bytes);
 static void ChunkShrink(MemChunk* chunk);
+static Bucket* FindBucketForString(Lips_Interpreter* interpreter);
+static MemChunk* FindChunkForString(Lips_Interpreter* interpreter, uint32_t n);
 
 static void DefineWithCurrent(Lips_Interpreter* interpreter, Lips_Cell name, Lips_Cell value);
 static uint32_t CheckArgumentCount(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args);
@@ -169,6 +174,8 @@ struct StringData {
   // 0-3 bytes - chunk index
   // 4-31 bytes - bucket index
   uint32_t flags;
+  // 0-15 bytes - string length without null terminator
+  // 16-31 bytes - allocated space - length
   uint32_t length;
   uint32_t hash;
 };
@@ -298,14 +305,18 @@ struct EvalState {
 struct FreeRegion {
   char* data;
   uint32_t size;
+  uint32_t lhs;
+  uint32_t rhs;
 };
 
 #define STRINGS_IN_CHUNK 128
 struct MemChunk {
   char* data;
   uint32_t numbytes;
-  uint32_t occupied;
+  uint32_t used;
+  uint32_t available;
   FreeRegion regions[STRINGS_IN_CHUNK];
+  /* FreeRegion* firs; */
   uint32_t numregions;
 };
 
@@ -1113,6 +1124,7 @@ Lips_CalculateMemoryStats(Lips_Interpreter* interpreter, Lips_MemoryStats* stats
   for (uint32_t i = 0; i < interpreter->numchunks; i++) {
     MemChunk* chunk = &interpreter->chunks[i];
     stats->str_allocated_bytes += chunk->numbytes;
+    stats->str_used_bytes += chunk->used;
   }
   stats->allocated_bytes += stats->cell_allocated_bytes + stats->str_allocated_bytes;
 }
@@ -1195,60 +1207,14 @@ DestroyCell(Lips_Interpreter* interpreter, Lips_Cell cell) {
 StringData*
 StringCreate(Lips_Interpreter* interp, const char* str, uint32_t n)
 {
-  StringData* data = NULL;
-  for (uint32_t i = interp->numstr_buckets; i > 0; i--)
-    if (interp->str_buckets[i-1].size < BUCKET_SIZE) {
-      // we found a bucket with available storage, use it
-      data = BucketNewString(&interp->str_buckets[i-1]);
-      data->flags = STR_DATA_MAKE_BUCKET_INDEX(i-1);
-    }
-  if (data == NULL) {
-    if (interp->numstr_buckets == interp->allocstr_buckets) {
-      // we're out of storage for buckets, allocate more
-      Bucket* new_buckets = interp->alloc(interp->allocstr_buckets * 2);
-      assert(new_buckets);
-      memcpy(new_buckets, interp->str_buckets, interp->numstr_buckets * sizeof(Bucket));
-      interp->str_buckets = new_buckets;
-      interp->dealloc(new_buckets, sizeof(Bucket) * interp->allocstr_buckets);
-      interp->allocstr_buckets = interp->allocstr_buckets * 2;
-    }
-    Bucket* new_bucket = &interp->str_buckets[interp->numstr_buckets];
-    CreateBucket(interp->alloc, new_bucket, sizeof(StringData));
-    data = BucketNewString(new_bucket);
-    data->flags = STR_DATA_MAKE_BUCKET_INDEX(interp->numstr_buckets);
-    interp->numstr_buckets++;
-  }
-  MemChunk* chunk = NULL;
-  for (uint32_t i = 0; i < interp->numchunks; i++) {
-    if (interp->chunks[i].numbytes - interp->chunks[i].occupied >= n+1) {
-      chunk = &interp->chunks[i];
-      break;
-    }
-  }
-  if (chunk == NULL) {
-    uint32_t sz = (n < 1024) ? 1024 : n;
-    if (interp->numchunks < MAX_CHUNKS) {
-      chunk = AddMemChunk(interp, sz);
-    } else {
-      chunk = &interp->chunks[0];
-      for (uint32_t i = 1; i < interp->numchunks; i++) {
-        if (interp->chunks[i].numbytes < chunk->numbytes) {
-          chunk = &interp->chunks[i];
-        }
-      }
-      char* new_data = interp->alloc(chunk->numbytes + sz);
-      assert(new_data);
-      memcpy(new_data, chunk->data, chunk->numbytes);
-      chunk->data = new_data;
-      FreeRegion* region = &chunk->regions[chunk->numregions++];
-      region->data = chunk->data + chunk->numbytes;
-      region->size = sz;
-    }
-  }
+  Bucket* bucket = FindBucketForString(interp);
+  StringData* data = BucketNewString(bucket);
+  data->flags = STR_DATA_MAKE_BUCKET_INDEX(bucket - interp->str_buckets);
+  MemChunk* chunk = FindChunkForString(interp, n);
   data->flags |= STR_DATA_MAKE_CHUNK_INDEX(chunk - interp->chunks);
   char* ptr = ChunkFindSpace(chunk, n+1);
   data->ptr_offset = ptr - chunk->data;
-  data->length = n;
+  data->length = STR_DATA_MAKE_LEN(n, 1);
   strncpy(ptr, str, n);
   ptr[n] = '\0';
   data->hash = ComputeHash(ptr);
@@ -1274,9 +1240,10 @@ StringDestroy(Lips_Interpreter* interp, StringData* str)
   }
   FreeRegion* region = &chunk->regions[chunk->numregions];
   region->data = ptr;
-  region->size = str->length+1;
+  region->size = STR_DATA_ALLOCATED(str);
   chunk->numregions++;
-  chunk->occupied -= region->size;
+  chunk->used -= STR_DATA_LENGTH(str)+1;
+  chunk->available += STR_DATA_ALLOCATED(str);
   Bucket* bucket = &interp->str_buckets[STR_DATA_BUCKET_INDEX(str)];
   BucketDeleteString(bucket, str);
 }
@@ -1285,7 +1252,7 @@ int
 StringEqual(Lips_Interpreter* interpreter, const StringData* lhs, const StringData* rhs)
 {
   if (lhs->hash == rhs->hash) {
-    if (lhs->length == rhs->length) {
+    if (STR_DATA_LENGTH(lhs) == STR_DATA_LENGTH(rhs)) {
       char* ptr1 = STR_DATA_PTR(STR_PTR_CHUNK(interpreter, lhs), lhs);
       char* ptr2 = STR_DATA_PTR(STR_PTR_CHUNK(interpreter, rhs), rhs);
       if (strcmp(ptr1, ptr2) == 0)
@@ -1960,7 +1927,8 @@ AddMemChunk(Lips_Interpreter* interpreter, uint32_t size)
   MemChunk* chunk = &interpreter->chunks[interpreter->numchunks];
   chunk->data = interpreter->alloc(size);
   chunk->numbytes = size;
-  chunk->occupied = 0;
+  chunk->used = 0;
+  chunk->available = chunk->numbytes;
   chunk->numregions = 1;
   chunk->regions[0].data = chunk->data;
   chunk->regions[0].size = size;
@@ -1972,7 +1940,7 @@ void
 RemoveMemChunk(Lips_Interpreter* interpreter, uint32_t i)
 {
   MemChunk* chunk = &interpreter->chunks[i];
-  assert(chunk->occupied == 0);
+  assert(chunk->used == 0 && chunk->available == chunk->numbytes);
   interpreter->dealloc(chunk->data, chunk->numbytes);
   if (i != interpreter->numchunks-1) {
     // swap with last place
@@ -2009,11 +1977,13 @@ ChunkFindSpace(MemChunk* chunk, uint32_t bytes)
     region->size -= bytes;
     region->data += bytes;
   }
-  chunk->occupied += bytes;
+  chunk->used += bytes;
+  chunk->available -= bytes;
   return ret;
 }
 
-void ChunkShrink(MemChunk* chunk)
+void
+ChunkShrink(MemChunk* chunk)
 {
   // sort regions using insertion sort(works very well on almost sorted arrays)
   for (uint32_t i = 1; i < chunk->numregions; i++) {
@@ -2044,6 +2014,56 @@ void ChunkShrink(MemChunk* chunk)
       i -= diff;
     }
   }
+}
+
+Bucket*
+FindBucketForString(Lips_Interpreter* interp)
+{
+  for (uint32_t i = interp->numstr_buckets; i > 0; i--)
+    if (interp->str_buckets[i-1].size < BUCKET_SIZE) {
+      return &interp->str_buckets[i-1];
+    }
+  if (interp->numstr_buckets == interp->allocstr_buckets) {
+    // we're out of storage for buckets, allocate more
+    Bucket* new_buckets = interp->alloc(interp->allocstr_buckets * 2);
+    assert(new_buckets);
+    memcpy(new_buckets, interp->str_buckets, interp->numstr_buckets * sizeof(Bucket));
+    interp->str_buckets = new_buckets;
+    interp->dealloc(new_buckets, sizeof(Bucket) * interp->allocstr_buckets);
+    interp->allocstr_buckets = interp->allocstr_buckets * 2;
+  }
+  Bucket* new_bucket = &interp->str_buckets[interp->numstr_buckets];
+  CreateBucket(interp->alloc, new_bucket, sizeof(StringData));
+  interp->numstr_buckets++;
+  return new_bucket;
+}
+
+MemChunk*
+FindChunkForString(Lips_Interpreter* interp, uint32_t n)
+{
+  for (uint32_t i = 0; i < interp->numchunks; i++) {
+    if (interp->chunks[i].available >= n+1) {
+      return &interp->chunks[i];
+    }
+  }
+  uint32_t sz = (n < 1024) ? 1024 : n;
+  if (interp->numchunks < MAX_CHUNKS) {
+    return AddMemChunk(interp, sz);
+  }
+  MemChunk* chunk = &interp->chunks[0];
+  for (uint32_t i = 1; i < interp->numchunks; i++) {
+    if (interp->chunks[i].numbytes < chunk->numbytes) {
+      chunk = &interp->chunks[i];
+    }
+  }
+  char* new_data = interp->alloc(chunk->numbytes + sz);
+  assert(new_data);
+  memcpy(new_data, chunk->data, chunk->numbytes);
+  chunk->data = new_data;
+  FreeRegion* region = &chunk->regions[chunk->numregions++];
+  region->data = chunk->data + chunk->numbytes;
+  region->size = sz;
+  return chunk;
 }
 
 void
