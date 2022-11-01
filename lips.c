@@ -57,9 +57,9 @@ typedef struct FreeRegion FreeRegion;
 #define STR_DATA_MAKE_CHUNK_INDEX(id) ((id) & 15)
 #define STR_PTR_CHUNK(interp, str) &(interp->chunks[STR_DATA_CHUNK_INDEX(str)])
 #define STR_DATA_PTR(chunk, str) &(chunk)->data[str->ptr_offset]
-#define STR_DATA_LENGTH(str) ((str)->length & ((1<<16)-1))
-#define STR_DATA_ALLOCATED(str) (((str)->length >> 16) + STR_DATA_LENGTH(str))
-#define STR_DATA_MAKE_LEN(n, alloc) ((n) | ((alloc) << 16))
+#define STR_DATA_LENGTH(str) ((str)->length & ((1<<28)-1))
+#define STR_DATA_ALLOCATED(str) (((str)->length >> 28) + STR_DATA_LENGTH(str))
+#define STR_DATA_MAKE_LEN(n, alloc) ((n) | ((alloc) << 28))
 #define GET_STR_PTR(interp, cell) STR_DATA_PTR(STR_PTR_CHUNK(interp, (cell)->data.str), (cell)->data.str)
 
 
@@ -174,8 +174,8 @@ struct StringData {
   // 0-3 bytes - chunk index
   // 4-31 bytes - bucket index
   uint32_t flags;
-  // 0-15 bytes - string length without null terminator
-  // 16-31 bytes - allocated space - length
+  // 0-27 bytes - string length without null terminator
+  // 28-31 bytes - allocated space - length
   uint32_t length;
   uint32_t hash;
 };
@@ -303,7 +303,7 @@ struct EvalState {
 #define ES_CATCH_PARENT(es) (es)->data.exec.parent
 
 struct FreeRegion {
-  char* data;
+  uint32_t offset;
   uint32_t size;
   uint32_t lhs;
   uint32_t rhs;
@@ -1239,7 +1239,7 @@ StringDestroy(Lips_Interpreter* interp, StringData* str)
     ChunkShrink(chunk);
   }
   FreeRegion* region = &chunk->regions[chunk->numregions];
-  region->data = ptr;
+  region->offset = (uint32_t)(ptr - chunk->data);
   region->size = STR_DATA_ALLOCATED(str);
   chunk->numregions++;
   chunk->used -= STR_DATA_LENGTH(str)+1;
@@ -1934,7 +1934,7 @@ AddMemChunk(Lips_Interpreter* interpreter, uint32_t size)
   chunk->used = 0;
   chunk->available = chunk->numbytes;
   chunk->numregions = 1;
-  chunk->regions[0].data = chunk->data;
+  chunk->regions[0].offset = 0;
   chunk->regions[0].size = size;
   interpreter->numchunks++;
   return chunk;
@@ -1971,7 +1971,7 @@ ChunkFindSpace(MemChunk* chunk, uint32_t bytes)
     ChunkShrink(chunk);
     assert(0);
   }
-  char* ret = region->data;
+  char* ret = chunk->data + region->offset;
   if (region->size == bytes) {
     if (region - chunk->regions != chunk->numregions-1) {
       memcpy(region, &chunk->regions[chunk->numregions-1], sizeof(FreeRegion));
@@ -1979,7 +1979,7 @@ ChunkFindSpace(MemChunk* chunk, uint32_t bytes)
     chunk->numregions--;
   } else {
     region->size -= bytes;
-    region->data += bytes;
+    region->offset += bytes;
   }
   chunk->used += bytes;
   chunk->available -= bytes;
@@ -1992,8 +1992,8 @@ ChunkShrink(MemChunk* chunk)
   // sort regions using insertion sort(works very well on almost sorted arrays)
   for (uint32_t i = 1; i < chunk->numregions; i++) {
     int j = i-1;
-    char* R = chunk->regions[i].data;
-    while (j >= 0 && R <= chunk->regions[j].data) {
+    uint32_t R = chunk->regions[i].offset;
+    while (j >= 0 && R <= chunk->regions[j].offset) {
       memcpy(&chunk->regions[j+1], &chunk->regions[j], sizeof(FreeRegion));
       j--;
     }
@@ -2003,11 +2003,11 @@ ChunkShrink(MemChunk* chunk)
   for (uint32_t i = chunk->numregions; i > 0; i--) {
     FreeRegion* region = &chunk->regions[i-1];
     uint32_t size = region->size;
-    while (region->data - region->size == (region-1)->data) {
+    while (region->offset - region->size == (region-1)->offset) {
       region--;
       size += region->size;
     }
-    int diff = region->data - chunk->regions[i-1].data;
+    uint32_t diff = region->offset - chunk->regions[i-1].offset;
     if (diff > 0) {
       chunk->regions[i-1-diff].size = size;
       // move regions left
@@ -2063,10 +2063,12 @@ FindChunkForString(Lips_Interpreter* interp, uint32_t n)
   char* new_data = interp->alloc(chunk->numbytes + sz);
   assert(new_data);
   memcpy(new_data, chunk->data, chunk->numbytes);
+  interp->dealloc(chunk->data, chunk->numbytes);
   chunk->data = new_data;
   FreeRegion* region = &chunk->regions[chunk->numregions++];
-  region->data = chunk->data + chunk->numbytes;
+  region->offset = chunk->numbytes;
   region->size = sz;
+  chunk->numbytes += sz;
   return chunk;
 }
 
