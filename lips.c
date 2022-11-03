@@ -165,7 +165,6 @@ static LIPS_DECLARE_MACRO(when);
 static LIPS_DECLARE_MACRO(catch);
 static LIPS_DECLARE_MACRO(intern);
 // TODO: implement cond
-/* static LIPS_DECLARE_MACRO(cond); */
 
 /// STRUCTS
 
@@ -312,13 +311,11 @@ struct FreeRegion {
 #define REGION_LEFT(chunk, region) ((region)->lhs == (uint32_t)-1 ? NULL : (FreeRegion*)&(chunk)->data[(region)->lhs])
 #define REGION_RIGHT(chunk, region) ((region)->rhs == (uint32_t)-1 ? NULL : (FreeRegion*)&(chunk)->data[(region)->rhs])
 
-/* #define STRINGS_IN_CHUNK 128 */
 struct MemChunk {
   char* data;
   uint32_t numbytes;
   uint32_t used;
   uint32_t available;
-  /* FreeRegion regions[STRINGS_IN_CHUNK]; */
   FreeRegion* first;
   FreeRegion* last;
   uint32_t numregions;
