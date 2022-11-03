@@ -133,8 +133,9 @@ static void IteratorNext(Iterator* it);
 
 static MemChunk* AddMemChunk(Lips_Interpreter* interpreter, uint32_t size);
 static void RemoveMemChunk(Lips_Interpreter* interpreter, uint32_t i);
-static char* ChunkFindSpace(MemChunk* chunk, uint32_t bytes);
+static char* ChunkFindSpace(MemChunk* chunk, uint32_t* bytes);
 static void ChunkShrink(MemChunk* chunk);
+static FreeRegion* PushRegion(MemChunk* chunk, uint32_t offset, uint32_t size);
 static Bucket* FindBucketForString(Lips_Interpreter* interpreter);
 static MemChunk* FindChunkForString(Lips_Interpreter* interpreter, uint32_t n);
 
@@ -308,16 +309,20 @@ struct FreeRegion {
   uint32_t lhs;
   uint32_t rhs;
 };
+#define REGION_LEFT(chunk, region) ((region)->lhs == (uint32_t)-1 ? NULL : (FreeRegion*)&(chunk)->data[(region)->lhs])
+#define REGION_RIGHT(chunk, region) ((region)->rhs == (uint32_t)-1 ? NULL : (FreeRegion*)&(chunk)->data[(region)->rhs])
 
-#define STRINGS_IN_CHUNK 128
+/* #define STRINGS_IN_CHUNK 128 */
 struct MemChunk {
   char* data;
   uint32_t numbytes;
   uint32_t used;
   uint32_t available;
-  FreeRegion regions[STRINGS_IN_CHUNK];
-  /* FreeRegion* firs; */
+  /* FreeRegion regions[STRINGS_IN_CHUNK]; */
+  FreeRegion* first;
+  FreeRegion* last;
   uint32_t numregions;
+  uint32_t deletions;
 };
 
 struct Parser {
@@ -1212,9 +1217,10 @@ StringCreate(Lips_Interpreter* interp, const char* str, uint32_t n)
   data->flags = STR_DATA_MAKE_BUCKET_INDEX(bucket - interp->str_buckets);
   MemChunk* chunk = FindChunkForString(interp, n);
   data->flags |= STR_DATA_MAKE_CHUNK_INDEX(chunk - interp->chunks);
-  char* ptr = ChunkFindSpace(chunk, n+1);
+  uint32_t bytes = n+1;
+  char* ptr = ChunkFindSpace(chunk, &bytes);
   data->ptr_offset = ptr - chunk->data;
-  data->length = STR_DATA_MAKE_LEN(n, 1);
+  data->length = STR_DATA_MAKE_LEN(n, bytes - n);
   strncpy(ptr, str, n);
   ptr[n] = '\0';
   data->hash = ComputeHash(ptr);
@@ -1226,22 +1232,13 @@ StringDestroy(Lips_Interpreter* interp, StringData* str)
 {
   MemChunk* chunk = &interp->chunks[STR_DATA_CHUNK_INDEX(str)];
   char* ptr = STR_DATA_PTR(chunk, str);
-  for (uint32_t i = 0; i < interp->numchunks; i++) {
-    MemChunk* tmp = &interp->chunks[i];
-    if (ptr >= tmp->data &&
-        ptr < tmp->data + tmp->numbytes) {
-      chunk = tmp;
-      break;
-    }
-  }
-  assert(chunk);
-  if (chunk->numregions == STRINGS_IN_CHUNK) {
+  assert(ptr >= chunk->data && ptr + STR_DATA_ALLOCATED(str) <= chunk->data + chunk->numbytes);
+  if (chunk->deletions % 128 == 127) {
     ChunkShrink(chunk);
+    printf("Chunk shrink!!!\n");
   }
-  FreeRegion* region = &chunk->regions[chunk->numregions];
-  region->offset = (uint32_t)(ptr - chunk->data);
-  region->size = STR_DATA_ALLOCATED(str);
-  chunk->numregions++;
+  chunk->deletions++;
+  PushRegion(chunk, ptr-chunk->data, STR_DATA_ALLOCATED(str));
   chunk->used -= STR_DATA_LENGTH(str)+1;
   chunk->available += STR_DATA_ALLOCATED(str);
   Bucket* bucket = &interp->str_buckets[STR_DATA_BUCKET_INDEX(str)];
@@ -1934,8 +1931,13 @@ AddMemChunk(Lips_Interpreter* interpreter, uint32_t size)
   chunk->used = 0;
   chunk->available = chunk->numbytes;
   chunk->numregions = 1;
-  chunk->regions[0].offset = 0;
-  chunk->regions[0].size = size;
+  chunk->first = (FreeRegion*)chunk->data;
+  chunk->first->offset = 0;
+  chunk->first->size = chunk->numbytes;
+  chunk->first->lhs = (uint32_t)-1;
+  chunk->first->rhs = (uint32_t)-1;
+  chunk->last = chunk->first;
+  chunk->deletions = 0;
   interpreter->numchunks++;
   return chunk;
 }
@@ -1954,70 +1956,116 @@ RemoveMemChunk(Lips_Interpreter* interpreter, uint32_t i)
 }
 
 char*
-ChunkFindSpace(MemChunk* chunk, uint32_t bytes)
+ChunkFindSpace(MemChunk* chunk, uint32_t* bytes)
 {
   FreeRegion* region = NULL;
+  uint32_t diff;
   // find a region which size differs from 'bytes' the least
-  for (uint32_t i = chunk->numregions; i > 0; i--) {
+  for (FreeRegion* it = chunk->last; it; it = REGION_LEFT(chunk, it)) {
+    diff = it->size - *bytes;
     if (region == NULL ||
-        (chunk->regions[i-1].size - bytes) < (region->size - bytes)) {
-      region = &chunk->regions[i-1];
-      if (region->size - bytes == 0)
+        diff < (region->size - *bytes)) {
+      region = it;
+      if (diff == 0)
         break;
     }
   }
   if (region == NULL) {
     //TODO: avoid fragmentation
-    ChunkShrink(chunk);
     assert(0);
   }
+  FreeRegion* left = REGION_LEFT(chunk, region);
+  FreeRegion* right = REGION_RIGHT(chunk, region);
+  chunk->used += *bytes;
   char* ret = chunk->data + region->offset;
-  if (region->size == bytes) {
-    if (region - chunk->regions != chunk->numregions-1) {
-      memcpy(region, &chunk->regions[chunk->numregions-1], sizeof(FreeRegion));
+  if (diff < sizeof(FreeRegion)) {
+    *bytes = region->size;
+    // remove 'region' from linked list
+    if (left) {
+      left->rhs = region->rhs;
+    } else {
+      chunk->first = right;
+    }
+    if (right) {
+      right->lhs = region->lhs;
+    } else {
+      chunk->last = left;
     }
     chunk->numregions--;
   } else {
-    region->size -= bytes;
-    region->offset += bytes;
+    // move region to right
+    region->offset += *bytes;
+    region->size -= *bytes;
+    FreeRegion* region_off = (FreeRegion*)((char*)region + *bytes);
+    memmove(region_off, region, sizeof(FreeRegion));
+    // follow invariants
+    if (left) {
+      left->rhs += *bytes;
+    } else {
+      chunk->first = region_off;
+    }
+    if (right) {
+      right->lhs -= *bytes;
+    } else {
+      chunk->last = region_off;
+    }
   }
-  chunk->used += bytes;
-  chunk->available -= bytes;
+  chunk->available -= *bytes;
   return ret;
 }
 
 void
 ChunkShrink(MemChunk* chunk)
 {
+  FreeRegion* region = NULL;
   // sort regions using insertion sort(works very well on almost sorted arrays)
-  for (uint32_t i = 1; i < chunk->numregions; i++) {
-    int j = i-1;
-    uint32_t R = chunk->regions[i].offset;
-    while (j >= 0 && R <= chunk->regions[j].offset) {
-      memcpy(&chunk->regions[j+1], &chunk->regions[j], sizeof(FreeRegion));
-      j--;
+  for (region = chunk->first; region; region = REGION_RIGHT(chunk, region)) {
+    FreeRegion* left = REGION_LEFT(chunk, region);
+    while (left && region->offset <= left->offset) {
+      memcpy(chunk->data + left->rhs, left, sizeof(FreeRegion));
+      left =  REGION_LEFT(chunk, left);
     }
-    memcpy(&chunk->regions[j+1], &chunk->regions[i], sizeof(FreeRegion));
+    if (REGION_RIGHT(chunk, left) != region) {
+      memcpy(chunk->data + left->rhs, region, sizeof(FreeRegion));
+    }
   }
   // merge regions
-  for (uint32_t i = chunk->numregions; i > 0; i--) {
-    FreeRegion* region = &chunk->regions[i-1];
-    uint32_t size = region->size;
-    while (region->offset - region->size == (region-1)->offset) {
-      region--;
-      size += region->size;
-    }
-    uint32_t diff = region->offset - chunk->regions[i-1].offset;
-    if (diff > 0) {
-      chunk->regions[i-1-diff].size = size;
-      // move regions left
-      for (uint32_t j = i-diff; j < chunk->numregions-diff; j++) {
-        memcpy(&chunk->regions[j], &chunk->regions[j+diff], sizeof(FreeRegion));
+  for (region = chunk->last; region; region = REGION_LEFT(chunk, region)) {
+    FreeRegion* left = REGION_LEFT(chunk, region);
+    while (left && (region->offset - region->size == left->offset)) {
+      left->rhs = region->rhs;
+      FreeRegion* right = REGION_RIGHT(chunk, region);
+      if (right) {
+        right->lhs = region->lhs;
       }
-      chunk->numregions -= diff;
-      i -= diff;
+      left->size += region->size;
+      if (region == chunk->last) {
+        region = left;
+      }
+      region = left;
+      chunk->numregions--;
+      left = REGION_LEFT(chunk, region);
     }
   }
+}
+
+FreeRegion*
+PushRegion(MemChunk* chunk, uint32_t offset, uint32_t size)
+{
+  FreeRegion* ret = (FreeRegion*)&chunk->data[offset];
+  if (LIPS_LIKELY(chunk->last != NULL)) {
+    chunk->last->rhs = offset;
+    ret->lhs = (char*)chunk->last - chunk->data;
+  } else {
+    ret->lhs = (uint32_t)-1;
+    chunk->first = ret;
+  }
+  ret->rhs = (uint32_t)-1;
+  ret->offset = offset;
+  ret->size = size;
+  chunk->last = ret;
+  chunk->numregions++;
+  return ret;
 }
 
 Bucket*
@@ -2045,29 +2093,32 @@ FindBucketForString(Lips_Interpreter* interp)
 MemChunk*
 FindChunkForString(Lips_Interpreter* interp, uint32_t n)
 {
+  // try to find a chunk with enough space
   for (uint32_t i = 0; i < interp->numchunks; i++) {
     if (interp->chunks[i].available >= n+1) {
       return &interp->chunks[i];
     }
   }
+  // try to add a new chunk
   uint32_t sz = (n < 1024) ? 1024 : n;
   if (interp->numchunks < MAX_CHUNKS) {
     return AddMemChunk(interp, sz);
   }
+  // find smallest chunk and reallocate it
   MemChunk* chunk = &interp->chunks[0];
   for (uint32_t i = 1; i < interp->numchunks; i++) {
     if (interp->chunks[i].numbytes < chunk->numbytes) {
       chunk = &interp->chunks[i];
     }
   }
+  // reallocate chunk
   char* new_data = interp->alloc(chunk->numbytes + sz);
   assert(new_data);
   memcpy(new_data, chunk->data, chunk->numbytes);
   interp->dealloc(chunk->data, chunk->numbytes);
   chunk->data = new_data;
-  FreeRegion* region = &chunk->regions[chunk->numregions++];
-  region->offset = chunk->numbytes;
-  region->size = sz;
+  // push a region to the end
+  PushRegion(chunk, chunk->numbytes, sz);
   chunk->numbytes += sz;
   return chunk;
 }
