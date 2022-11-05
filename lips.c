@@ -83,7 +83,7 @@ static int Lips_IsTokenNumber(const Token* token);
 static Lips_Cell ParseNumber(Lips_Interpreter* interp, const Token* token);
 static Lips_Cell GenerateAST(Lips_Interpreter* interp, Parser* parser);
 
-static void CreateBucket(Lips_AllocFunc alloc, Bucket* bucket, uint32_t num_elements, uint32_t elem_size);
+static void CreateBucket(Lips_AllocFunc alloc, Bucket* bucket, uint32_t elem_size);
 static void DestroyBucket(Lips_Interpreter* interpreter, Bucket* bucket, uint32_t elem_size);
 static Lips_Cell BucketNewCell(Bucket* bucket);
 static void BucketDeleteCell(Bucket* bucket, Lips_Cell cell);
@@ -1390,7 +1390,7 @@ NewCell(Lips_Interpreter* interp)
   }
   // push back a new bucket
   Bucket* new_bucket = &interp->buckets[interp->numbuckets];
-  CreateBucket(interp->alloc, new_bucket, BUCKET_SIZE, sizeof(Lips_Value));
+  CreateBucket(interp->alloc, new_bucket, sizeof(Lips_Value));
   interp->numbuckets++;
   return BucketNewCell(new_bucket);
 }
@@ -1524,10 +1524,10 @@ GenerateAST(Lips_Interpreter* interpreter, Parser* parser)
 }
 
 void
-CreateBucket(Lips_AllocFunc alloc, Bucket* bucket, uint32_t num_elements, uint32_t elem_size)
+CreateBucket(Lips_AllocFunc alloc, Bucket* bucket, uint32_t elem_size)
 {
   uint32_t i;
-  bucket->data = (Lips_Value*)alloc(num_elements * elem_size);
+  bucket->data = (Lips_Value*)alloc(BUCKET_SIZE * elem_size);
   bucket->size = 0;
   bucket->next = 0;
   uint8_t* data = bucket->data;
@@ -2083,7 +2083,7 @@ FindBucketForString(Lips_Interpreter* interp, MemChunk* chunk)
     chunk->allocbuckets *= 2;
   }
   Bucket* new_bucket = &chunk->buckets[chunk->numbuckets];
-  CreateBucket(interp->alloc, new_bucket, 128, sizeof(StringData));
+  CreateBucket(interp->alloc, new_bucket, sizeof(StringData));
   chunk->numbuckets++;
   return new_bucket;
 }
