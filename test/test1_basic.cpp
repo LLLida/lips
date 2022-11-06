@@ -108,6 +108,17 @@ int main(int argc, char** argv) {
          memoryStats.str_allocated_bytes,
          memoryStats.str_used_bytes);
 
+  Lips_GarbageCollect(interp);
+  printf("=======Garbage collection done=======\n");
+
+  Lips_CalculateMemoryStats(interp, &memoryStats);
+  printf("MemoryStats: \n\tallocated=%u\n\tcells=%u\n\tcells_used=%u\n\tstrings=%u\n\tstrings_used=%u\n",
+         memoryStats.allocated_bytes,
+         memoryStats.cell_allocated_bytes,
+         memoryStats.cell_used_bytes,
+         memoryStats.str_allocated_bytes,
+         memoryStats.str_used_bytes);
+
   Lips_DestroyInterpreter(interp);
   return 0;
 }

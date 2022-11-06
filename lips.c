@@ -41,6 +41,7 @@ typedef struct FreeRegion FreeRegion;
 #define LIPS_EOF (-1)
 #define STACK_INVALID_POS ((uint32_t)-1)
 #define DEAD_MASK (1<<31)
+#define MARK_MASK (1<<30)
 #define IS_DEAD(cell) ((cell).type & DEAD_MASK)
 #define IS_WHITESPACE(c) ((c) == ' ' || (c) == '\n' || (c) == '\t' || (c) == '\r')
 #define IS_SPECIAL_CHAR(c) ((c) == '(' || (c) == ')' || (c) == '\'' || (c) == '`')
@@ -146,6 +147,9 @@ static void DefineArgumentList(Lips_Interpreter* interpreter, Lips_Cell callable
 static void DefineArgumentArray(Lips_Interpreter* interpreter, Lips_Cell callable, uint32_t numargs, Lips_Cell* argvalues);
 static void FreeArgumentArray(Lips_Interpreter* interpreter, uint32_t numargs, Lips_Cell* args);
 static Lips_Cell EvalNonPair(Lips_Interpreter* interpreter, Lips_Cell cell);
+
+static void Mark(Lips_Interpreter* interpreter);
+static void Sweep(Lips_Interpreter* interpreter);
 
 static LIPS_DECLARE_FUNCTION(list);
 static LIPS_DECLARE_FUNCTION(car);
@@ -646,8 +650,8 @@ Lips_GetError(const Lips_Interpreter* interpreter)
 LIPS_HOT_FUNCTION void
 Lips_GarbageCollect(Lips_Interpreter* interpreter)
 {
-  (void)interpreter;
-  // TODO: garbage collection
+  Mark(interpreter);
+  Sweep(interpreter);
 }
 
 Lips_Cell
@@ -2257,6 +2261,101 @@ EvalNonPair(Lips_Interpreter* interpreter, Lips_Cell cell)
     return Lips_InternCell(interpreter, cell);
   }
   assert(0 && "internal error: cell has undefined type");
+}
+
+void
+Mark(Lips_Interpreter* interpreter)
+{
+  HashTable* env = InterpreterEnv(interpreter);
+  Iterator it;
+  const char* key;
+  Lips_Cell value;
+  uint32_t depth;
+  Lips_Cell* prev;
+  do {
+    for (HashTableIterate(env, &it); !IteratorIsEmpty(&it); IteratorNext(&it)) {
+      IteratorGet(&it, &key, &value);
+      depth = 1;
+    cycle:
+      switch (GET_TYPE(value)) {
+      default: assert(0 && "internal error");
+      case LIPS_TYPE_INTEGER:
+      case LIPS_TYPE_REAL:
+      case LIPS_TYPE_STRING:
+      case LIPS_TYPE_SYMBOL:
+      case LIPS_TYPE_C_FUNCTION:
+      case LIPS_TYPE_C_MACRO:
+      case LIPS_TYPE_USER:
+        value->type |= MARK_MASK;
+        depth--;
+        break;
+      case LIPS_TYPE_MACRO:
+      case LIPS_TYPE_FUNCTION:
+        if (value->type & MARK_MASK) {
+          depth--;
+        } else {
+          prev = StackRequire(interpreter->alloc, interpreter->dealloc,
+                              &interpreter->stack, sizeof(Lips_Cell));
+          *prev = GET_LFUNC(value).args;
+          value = GET_LFUNC(value).body;
+          depth++;
+          goto cycle;
+        }
+        break;
+      case LIPS_TYPE_PAIR:
+        if (value->type & MARK_MASK) {
+          depth--;
+        } else {
+          value->type |= MARK_MASK;
+          if (GET_HEAD(value)) {
+            prev = StackRequire(interpreter->alloc, interpreter->dealloc,
+                                &interpreter->stack, sizeof(Lips_Cell));
+            *prev = GET_TAIL(value);
+            value = GET_HEAD(value);
+            depth++;
+          }
+          goto cycle;
+        }
+        break;
+      }
+      if (depth > 0) {
+        value = *prev;
+        assert(StackRelease(&interpreter->stack, prev) == sizeof(Lips_Cell));
+        while (!value && depth > 1) {
+          prev--;
+          depth--;
+          value = *prev;
+          assert(StackRelease(&interpreter->stack, prev) == sizeof(Lips_Cell));
+        }
+        if (value) {
+          goto cycle;
+        }
+      }
+    }
+    env = EnvParent(interpreter, env);
+  } while (env);
+}
+
+void
+Sweep(Lips_Interpreter* interpreter)
+{
+  for (uint32_t i = 0; i < interpreter->numbuckets; i++) {
+    Bucket* bucket = &interpreter->buckets[i];
+    uint32_t count = bucket->size;
+    for (uint32_t i = 0; count > 0; i++) {
+      Lips_Cell cell = (Lips_Value*)bucket->data + i;
+      if ((cell->type & DEAD_MASK) == 0) {
+        if ((cell->type & MARK_MASK) == 0) {
+          DestroyCell(interpreter, cell);
+          BucketDeleteCell(bucket, cell);
+        } else {
+          // unmark cell
+          cell->type &= ~MARK_MASK;
+        }
+        count--;
+      }
+    }
+  }
 }
 
 
