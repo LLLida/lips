@@ -2266,6 +2266,29 @@ EvalNonPair(Lips_Interpreter* interpreter, Lips_Cell cell)
 void
 Mark(Lips_Interpreter* interpreter)
 {
+  /*
+    Sample implementation with recursion(simplified):
+  */
+#if 0
+  void Mark(Cell cell) {
+    switch (cell->type) {
+    case int:
+    case float:
+    case string:
+      /* types that do not contain references to other cells */
+      cell->marked = true;
+      return;
+    case function:
+      Mark(cell->func_args);
+      Mark(cell->func_body);
+      return;
+    case list:
+      Mark(car(cell));
+      Mark(cdr(cell));
+      return;
+    }
+  }
+#endif
   HashTable* env = InterpreterEnv(interpreter);
   Iterator it;
   const char* key;
@@ -2339,6 +2362,7 @@ Mark(Lips_Interpreter* interpreter)
 void
 Sweep(Lips_Interpreter* interpreter)
 {
+  // delete all unmarked cells
   for (uint32_t i = 0; i < interpreter->numbuckets; i++) {
     Bucket* bucket = &interpreter->buckets[i];
     uint32_t count = bucket->size;
