@@ -3,6 +3,10 @@
 
 * Roadmap
 
+** Rename to Lips_Machine
+
+=Lips_Interpreter= sounds very ugly and is hard to spell. Instead =Lips_Machine= is super cool. The diff would be gigantic haha
+
 ** Improve tests
 
 
@@ -14,14 +18,6 @@ Exceptions are implemented. Need to improve error handling inside internal funct
 ** User-defined types
 
 This is a needed feature. Maybe I would make int, real user types?
-
-** Efficient string/vector allocator
-
-Reduce number of allocations by merging strings into pages.
-
-** Garbage collector
-
-Use mark-and-sweep algorithm.
 
 ** Improve API
 
@@ -41,7 +37,7 @@ Library initialization should look like this:
  2. list managing functions(=car=, =list=, =caddaar= etc.)
  3. general functions(===, =nilp=, =typeof= etc.)
  4. environment functions(=eval=, =intern= etc.)
- 5. string functions(=format=, =concat=, =capitalize= etc.)
+ 5. string functions(=format=, =concat=, =capitalize= etc.). =format= will cause the most problems because I should wrap my head around strings growing.
 
 ** Docstrings
 
@@ -53,7 +49,3 @@ Do we really need them?
   (quote something) -> 'something
   (lambda (a) $car (list a 7 6 5)) -> (lambda (a) (car (list a 7 6 5)))
 #+end_src
-
-** Rename to Lips_Machine
-
-=Lips_Interpreter= sounds very ugly and is hard to spell. Instead =Lips_Machine= is super cool. The diff would be gigantic haha
