@@ -53,9 +53,12 @@ typedef struct FreeRegion FreeRegion;
   } while (0)
 #define GET_STR(cell) ((cell)->data.str)
 #define STR_DATA_CHUNK_INDEX(str) ((str)->flags & 15)
-#define STR_DATA_BUCKET_INDEX(str) ((str)->flags >> 4)
+#define STR_DATA_BUCKET_INDEX(str) (((str)->flags >> 4) & ((1<<17)-1))
+#define STR_DATA_REF_COUNT(str) ((str)->flags >> 21)
 #define STR_DATA_MAKE_BUCKET_INDEX(id) ((id) << 4)
 #define STR_DATA_MAKE_CHUNK_INDEX(id) ((id) & 15)
+#define STR_DATA_REF_INC(str) ((str)->flags += (1<<21))
+#define STR_DATA_REF_DEC(str) ((str)->flags -= (1<<21))
 #define STR_PTR_CHUNK(interp, str) &(interp->chunks[STR_DATA_CHUNK_INDEX(str)])
 #define STR_DATA_PTR(chunk, str) &(chunk)->data[str->ptr_offset]
 #define STR_DATA_PTR2(interp, str) STR_DATA_PTR(STR_PTR_CHUNK(interp, str), str)
@@ -173,11 +176,12 @@ static LIPS_DECLARE_MACRO(intern);
 // Copy-On-Write string
 struct StringData {
   uint32_t ptr_offset;
-  // 0-3 bytes - chunk index
-  // 4-31 bytes - bucket index
+  // 0-3 bits - chunk index
+  // 4-20 bits - bucket index
+  // 21-31 bits - refcounter
   uint32_t flags;
-  // 0-27 bytes - string length without null terminator
-  // 28-31 bytes - allocated space - length
+  // 0-27 bits - string length without null terminator
+  // 28-31 bits - allocated space - length
   uint32_t length;
   uint32_t hash;
 };
@@ -686,6 +690,7 @@ Lips_NewStringN(Lips_Interpreter* interpreter, const char* str, uint32_t n)
   Lips_Cell cell = NewCell(interpreter);
   cell->type = LIPS_TYPE_STRING;
   GET_STR(cell) = StringCreate(interpreter, str, n);
+  STR_DATA_REF_INC(GET_STR(cell));
   return cell;
 }
 
@@ -701,6 +706,7 @@ Lips_NewSymbolN(Lips_Interpreter* interpreter, const char* str, uint32_t n)
   Lips_Cell cell = NewCell(interpreter);
   cell->type = LIPS_TYPE_SYMBOL;
   GET_STR(cell) = StringCreate(interpreter, str, n);
+  STR_DATA_REF_INC(GET_STR(cell));
   return cell;
 }
 
@@ -1011,6 +1017,7 @@ Lips_Define(Lips_Interpreter* interpreter, const char* name, Lips_Cell cell)
     env = EnvParent(interpreter, env);
   }
   StringData* key = StringCreate(interpreter, name, strlen(name));
+  STR_DATA_REF_INC(key);
   Lips_Cell* ptr = HashTableInsert(interpreter, env, key, cell);
   if (ptr == NULL) {
     LIPS_THROW_ERROR(interpreter, "Value '%s' is already defined", name);
@@ -1031,6 +1038,7 @@ Lips_DefineCell(Lips_Interpreter* interpreter, Lips_Cell cell, Lips_Cell value)
   if (ptr == NULL) {
     LIPS_THROW_ERROR(interpreter, "Value '%s' is already defined");
   }
+  STR_DATA_REF_INC(GET_STR(cell));
   return value;
 }
 
@@ -1229,6 +1237,9 @@ StringCreate(Lips_Interpreter* interp, const char* str, uint32_t n)
 void
 StringDestroy(Lips_Interpreter* interp, StringData* str)
 {
+  STR_DATA_REF_DEC(str);
+  if (STR_DATA_REF_COUNT(str) > 0)
+    return;
   MemChunk* chunk = &interp->chunks[STR_DATA_CHUNK_INDEX(str)];
   char* ptr = STR_DATA_PTR(chunk, str) - sizeof(StringData*);
   assert(ptr >= chunk->data && ptr + STR_DATA_ALLOCATED(str) <= chunk->data + chunk->numbytes);
@@ -1740,6 +1751,13 @@ void
 PopEnv(Lips_Interpreter* interpreter)
 {
   HashTable* env = InterpreterEnv(interpreter);
+  Iterator it;
+  for (HashTableIterate(env, &it); !IteratorIsEmpty(&it); IteratorNext(&it)) {
+    StringData* key;
+    Lips_Cell cell;
+    IteratorGet(&it, &key, &cell);
+    StringDestroy(interpreter, key);
+  }
   HashTableDestroy(&interpreter->stack, env);
   interpreter->envpos = env->parent;
 }
