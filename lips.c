@@ -188,6 +188,8 @@ struct StringData {
 
 struct HashTable {
   uint32_t allocated;
+  // 0-30 bits - number of elements in hash table
+  // 31 bit - constant flag
   uint32_t flags;
   uint32_t parent;
 };
@@ -441,6 +443,7 @@ Lips_DefaultCreateInterpreter()
 LIPS_COLD_FUNCTION void
 Lips_DestroyInterpreter(Lips_Interpreter* interpreter)
 {
+  PopEnv(interpreter);
   // clear all resources
   Lips_DeallocFunc dealloc = interpreter->dealloc;
   DestroyStack(dealloc, &interpreter->stack);
@@ -1017,7 +1020,6 @@ Lips_Define(Lips_Interpreter* interpreter, const char* name, Lips_Cell cell)
     env = EnvParent(interpreter, env);
   }
   StringData* key = StringCreate(interpreter, name, strlen(name));
-  STR_DATA_REF_INC(key);
   Lips_Cell* ptr = HashTableInsert(interpreter, env, key, cell);
   if (ptr == NULL) {
     LIPS_THROW_ERROR(interpreter, "Value '%s' is already defined", name);
@@ -1038,7 +1040,6 @@ Lips_DefineCell(Lips_Interpreter* interpreter, Lips_Cell cell, Lips_Cell value)
   if (ptr == NULL) {
     LIPS_THROW_ERROR(interpreter, "Value '%s' is already defined");
   }
-  STR_DATA_REF_INC(GET_STR(cell));
   return value;
 }
 
@@ -1231,6 +1232,7 @@ StringCreate(Lips_Interpreter* interp, const char* str, uint32_t n)
   strncpy(ptr, str, n);
   ptr[n] = '\0';
   data->hash = ComputeHash(ptr);
+  printf("CREATED %s\n", ptr);
   return data;
 }
 
@@ -1242,6 +1244,7 @@ StringDestroy(Lips_Interpreter* interp, StringData* str)
     return;
   MemChunk* chunk = &interp->chunks[STR_DATA_CHUNK_INDEX(str)];
   char* ptr = STR_DATA_PTR(chunk, str) - sizeof(StringData*);
+  printf("DESTROYED %s\n", STR_DATA_PTR(chunk, str));
   assert(ptr >= chunk->data && ptr + STR_DATA_ALLOCATED(str) <= chunk->data + chunk->numbytes);
   if (chunk->deletions % 128 == 127) {
     ChunkShrink(chunk);
@@ -1849,6 +1852,7 @@ HashTableInsert(Lips_Interpreter* interp,
     id = (id+1) % ht->allocated;
   }
   data[id].key = key;
+  STR_DATA_REF_INC(key);
   data[id].value = value;
   // increment the size counter
   HASH_TABLE_SET_SIZE(ht, HASH_TABLE_GET_SIZE(ht)+1);
