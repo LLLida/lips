@@ -471,6 +471,8 @@ Lips_DestroyInterpreter(Lips_Interpreter* interpreter)
     }
     DestroyBucket(interpreter, bucket, sizeof(Lips_Value));
   }
+  for (uint32_t i = 0; i < interpreter->numstr_buckets; i++)
+    DestroyBucket(interpreter, &interpreter->str_buckets[i], sizeof(StringData));
   for (uint32_t i = interpreter->numchunks; i > 0; i--) {
     RemoveMemChunk(interpreter, i-1);
   }
