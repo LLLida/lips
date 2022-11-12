@@ -77,6 +77,7 @@ static Lips_Cell NewCell(Lips_Interpreter* interp) LIPS_HOT_FUNCTION;
 static void DestroyCell(Lips_Interpreter* interpreter, Lips_Cell cell);
 
 static StringData* StringCreate(Lips_Interpreter* interp, const char* str, uint32_t n);
+static StringData* StringCreateWithHash(Lips_Interpreter* interp, const char* str, uint32_t n, uint32_t hash);
 static void StringDestroy(Lips_Interpreter* interp, StringData* str);
 static int StringEqual(Lips_Interpreter* interpreter, const StringData* lhs, const StringData* rhs);
 
@@ -118,7 +119,10 @@ static HashTable* InterpreterEnv(Lips_Interpreter* interpreter);
 static HashTable* PushEnv(Lips_Interpreter* interpreter);
 static void PopEnv(Lips_Interpreter* interpreter);
 static HashTable* EnvParent(Lips_Interpreter* interpreter, HashTable* env);
+// compute hash of null terminated string
 static uint32_t ComputeHash(const char* string) LIPS_PURE_FUNCTION;
+// compute hash of sized string(no null terminator at end)
+static uint32_t ComputeHashN(const char* string, uint32_t n) LIPS_PURE_FUNCTION;
 static HashTable* HashTableCreate(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
                                   Stack* stack);
 static void HashTableDestroy(Stack* stack, HashTable* ht);
@@ -127,6 +131,7 @@ static Lips_Cell* HashTableInsert(Lips_Interpreter* itnerpreter,
                                   HashTable* ht, StringData* key, Lips_Cell value);
 static Lips_Cell* HashTableSearch(Lips_Interpreter* interp, const HashTable* ht, const char* key);
 static Lips_Cell* HashTableSearchWithHash(Lips_Interpreter* interp, const HashTable* ht, uint32_t hash, const char* key);
+static StringData* HashTableSearchKey(Lips_Interpreter* interp, const HashTable* ht, uint32_t hash, const char* key, uint32_t n);
 static void HashTableIterate(HashTable* ht, Iterator* it);
 static int IteratorIsEmpty(const Iterator* it);
 static void IteratorGet(const Iterator* it, StringData** key, Lips_Cell* value);
@@ -399,6 +404,11 @@ Lips_CreateInterpreter(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc)
   // define builtins
   interp->default_file = Lips_NewString(interp, "<eval>");
   interp->S_nil = Lips_Define(interp, "nil", Lips_NewPair(interp, NULL, NULL));
+  // important optimization: this allows to reuse string "...",
+  // so anytime we encounter "..." in code we don't allocate a new string
+  Lips_Define(interp, "...", interp->S_nil);
+  // t is just an integer
+  // FIXME: do I need to add a new type for "t"?
   interp->S_t = Lips_Define(interp, "t", Lips_NewInteger(interp, 1));
   interp->S_filename = Lips_NewPair(interp, NULL, NULL);
 
@@ -444,6 +454,8 @@ LIPS_COLD_FUNCTION void
 Lips_DestroyInterpreter(Lips_Interpreter* interpreter)
 {
   PopEnv(interpreter);
+  assert(interpreter->envpos == STACK_INVALID_POS &&
+         "Tried to call Lips_DestroyInterpreter while running Lisp code");
   // clear all resources
   Lips_DeallocFunc dealloc = interpreter->dealloc;
   DestroyStack(dealloc, &interpreter->stack);
@@ -459,8 +471,6 @@ Lips_DestroyInterpreter(Lips_Interpreter* interpreter)
     }
     DestroyBucket(interpreter, bucket, sizeof(Lips_Value));
   }
-  for (uint32_t i = 0; i < interpreter->numstr_buckets; i++)
-    DestroyBucket(interpreter, &interpreter->str_buckets[i], sizeof(StringData));
   for (uint32_t i = interpreter->numchunks; i > 0; i--) {
     RemoveMemChunk(interpreter, i-1);
   }
@@ -708,7 +718,19 @@ Lips_NewSymbolN(Lips_Interpreter* interpreter, const char* str, uint32_t n)
 {
   Lips_Cell cell = NewCell(interpreter);
   cell->type = LIPS_TYPE_SYMBOL;
-  GET_STR(cell) = StringCreate(interpreter, str, n);
+  StringData* data = NULL;
+  // try to find string in environments so we don't waste space
+  HashTable* env = InterpreterEnv(interpreter);
+  uint32_t hash = ComputeHashN(str, n);
+  do {
+    data = HashTableSearchKey(interpreter, env, hash, str, n);
+    if (data)
+      goto skip;
+    env = EnvParent(interpreter, env);
+  } while (env);
+  data = StringCreateWithHash(interpreter, str, n, hash);
+ skip:
+  GET_STR(cell) = data;
   STR_DATA_REF_INC(GET_STR(cell));
   return cell;
 }
@@ -1021,6 +1043,7 @@ Lips_Define(Lips_Interpreter* interpreter, const char* name, Lips_Cell cell)
   }
   StringData* key = StringCreate(interpreter, name, strlen(name));
   Lips_Cell* ptr = HashTableInsert(interpreter, env, key, cell);
+  STR_DATA_REF_INC(key);
   if (ptr == NULL) {
     LIPS_THROW_ERROR(interpreter, "Value '%s' is already defined", name);
   }
@@ -1037,6 +1060,7 @@ Lips_DefineCell(Lips_Interpreter* interpreter, Lips_Cell cell, Lips_Cell value)
     env = EnvParent(interpreter, env);
   }
   Lips_Cell* ptr = HashTableInsert(interpreter, env, GET_STR(cell), value);
+  STR_DATA_REF_INC(GET_STR(cell));
   if (ptr == NULL) {
     LIPS_THROW_ERROR(interpreter, "Value '%s' is already defined");
   }
@@ -1232,7 +1256,27 @@ StringCreate(Lips_Interpreter* interp, const char* str, uint32_t n)
   strncpy(ptr, str, n);
   ptr[n] = '\0';
   data->hash = ComputeHash(ptr);
-  printf("CREATED %s\n", ptr);
+  return data;
+}
+
+StringData*
+StringCreateWithHash(Lips_Interpreter* interp, const char* str, uint32_t n, uint32_t hash)
+{
+  Bucket* bucket = FindBucketForString(interp);
+  StringData* data = BucketNewString(bucket);
+  data->flags = STR_DATA_MAKE_BUCKET_INDEX(bucket - interp->str_buckets);
+  uint32_t bytes = n+1+sizeof(StringData*);
+  MemChunk* chunk = FindChunkForString(interp, bytes);
+  data->flags |= STR_DATA_MAKE_CHUNK_INDEX(chunk - interp->chunks);
+  char* ptr = ChunkFindSpace(chunk, &bytes);
+  *(StringData**)(ptr) = data;
+  chunk->used += n+1;
+  data->ptr_offset = ptr + sizeof(StringData*) - chunk->data;
+  ptr += sizeof(StringData*);
+  data->length = STR_DATA_MAKE_LEN(n, bytes - n - sizeof(StringData*));
+  strncpy(ptr, str, n);
+  ptr[n] = '\0';
+  data->hash = hash;
   return data;
 }
 
@@ -1244,7 +1288,6 @@ StringDestroy(Lips_Interpreter* interp, StringData* str)
     return;
   MemChunk* chunk = &interp->chunks[STR_DATA_CHUNK_INDEX(str)];
   char* ptr = STR_DATA_PTR(chunk, str) - sizeof(StringData*);
-  printf("DESTROYED %s\n", STR_DATA_PTR(chunk, str));
   assert(ptr >= chunk->data && ptr + STR_DATA_ALLOCATED(str) <= chunk->data + chunk->numbytes);
   if (chunk->deletions % 128 == 127) {
     ChunkShrink(chunk);
@@ -1253,7 +1296,6 @@ StringDestroy(Lips_Interpreter* interp, StringData* str)
   chunk->deletions++;
   PushRegion(chunk, ptr-chunk->data, STR_DATA_ALLOCATED(str));
   chunk->used -= STR_DATA_LENGTH(str)+1;
-  chunk->available += STR_DATA_ALLOCATED(str);
   Bucket* bucket = &interp->str_buckets[STR_DATA_BUCKET_INDEX(str)];
   BucketDeleteString(bucket, str);
 }
@@ -1789,6 +1831,19 @@ ComputeHash(const char* string)
   return hash;
 }
 
+uint32_t
+ComputeHashN(const char* string, uint32_t n)
+{
+  uint32_t p_pow = 1;
+  uint32_t hash = 0;
+  while (n--) {
+    hash = (hash + (*string - 'a' + 1) * p_pow) % 1000000009;
+    p_pow = (p_pow * 31) % 1000000009;
+    string++;
+  }
+  return hash;
+}
+
 HashTable*
 HashTableCreate(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* stack)
 {
@@ -1852,7 +1907,6 @@ HashTableInsert(Lips_Interpreter* interp,
     id = (id+1) % ht->allocated;
   }
   data[id].key = key;
-  STR_DATA_REF_INC(key);
   data[id].value = value;
   // increment the size counter
   HASH_TABLE_SET_SIZE(ht, HASH_TABLE_GET_SIZE(ht)+1);
@@ -1877,6 +1931,29 @@ HashTableSearchWithHash(Lips_Interpreter* interpreter, const HashTable* ht, uint
     if (NODE_VALID(data[id])) {
       if (strcmp(STR_DATA_PTR2(interpreter, data[id].key), key) == 0)
         return &data[id].value;
+      i++;
+      // linear probing
+      id++;
+    } else {
+      return NULL;
+    }
+  }
+  return NULL;
+}
+
+StringData*
+HashTableSearchKey(Lips_Interpreter* interp, const HashTable* ht, uint32_t hash, const char* key, uint32_t n)
+{
+  Node* data = HASH_TABLE_DATA(ht);
+  uint32_t i = 0;
+  uint32_t id = hash;
+  while (i < HASH_TABLE_GET_SIZE(ht)) {
+    id = id % ht->allocated;
+    if (NODE_VALID(data[id])) {
+      StringData* val = data[id].key;
+      if (hash == val->hash &&
+          strncmp(STR_DATA_PTR2(interp, val), key, n) == 0)
+        return data[id].key;
       i++;
       // linear probing
       id++;
@@ -2110,6 +2187,7 @@ PushRegion(MemChunk* chunk, uint32_t offset, uint32_t size)
   ret->size = size;
   chunk->last = ret;
   chunk->numregions++;
+  chunk->available += size;
   return ret;
 }
 
@@ -2176,6 +2254,7 @@ DefineWithCurrent(Lips_Interpreter* interpreter, Lips_Cell name, Lips_Cell value
   HashTable* env = InterpreterEnv(interpreter);
   Lips_Cell* ptr = HashTableInsert(interpreter, env,
                                    GET_STR(name), value);
+  STR_DATA_REF_INC(GET_STR(name));
   assert(ptr && "Internal error(value is already defined)");
 }
 
