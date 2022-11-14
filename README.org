@@ -3,10 +3,6 @@
 
 * Roadmap
 
-** Rename to Lips_Machine
-
-=Lips_Interpreter= sounds very ugly and is hard to spell. Instead =Lips_Machine= is super cool. The diff would be gigantic haha
-
 ** Improve tests
 
 
