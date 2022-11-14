@@ -40,16 +40,16 @@ extern "C" {
 typedef void*(*Lips_AllocFunc)(size_t bytes);
 typedef void(*Lips_DeallocFunc)(void* ptr, size_t bytes);
 
-typedef struct Lips_Interpreter Lips_Interpreter;
+typedef struct Lips_Machine Lips_Machine;
 
 typedef struct Lips_Value Lips_Value;
 
 typedef Lips_Value* Lips_Cell;
 
-typedef Lips_Cell(*Lips_Macro)(Lips_Interpreter* interp, Lips_Cell args, void* udata);
-typedef Lips_Cell(*Lips_Func)(Lips_Interpreter* interp, uint32_t numargs, Lips_Cell* args, void* udata);
-#define LIPS_DECLARE_MACRO(name) Lips_Cell M_##name (Lips_Interpreter* interpreter, Lips_Cell args, void* udata)
-#define LIPS_DECLARE_FUNCTION(name) Lips_Cell F_##name (Lips_Interpreter* interpreter, uint32_t numargs, Lips_Cell* args, void* udata)
+typedef Lips_Cell(*Lips_Macro)(Lips_Machine* interp, Lips_Cell args, void* udata);
+typedef Lips_Cell(*Lips_Func)(Lips_Machine* interp, uint32_t numargs, Lips_Cell* args, void* udata);
+#define LIPS_DECLARE_MACRO(name) Lips_Cell M_##name (Lips_Machine* interpreter, Lips_Cell args, void* udata)
+#define LIPS_DECLARE_FUNCTION(name) Lips_Cell F_##name (Lips_Machine* interpreter, uint32_t numargs, Lips_Cell* args, void* udata)
 #define LIPS_DEFINE_MACRO(interp, name, numargs, udata) Lips_Define(interp, #name, Lips_NewCMacro(interp, M_##name, numargs, udata));
 #define LIPS_DEFINE_FUNCTION(interp, name, numargs, udata) Lips_Define(interp, #name, Lips_NewCFunction(interp, F_##name, numargs, udata));
 
@@ -103,76 +103,76 @@ typedef struct {
    @param alloc function that will be used by interpreter for memory allocation
    @param dealloc function that will be used by interpreter for memory deallocation
  */
-Lips_Interpreter* Lips_CreateInterpreter(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc) LIPS_COLD_FUNCTION;
+Lips_Machine* Lips_CreateMachine(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc) LIPS_COLD_FUNCTION;
 /* Create a Lisp interpreter with malloc() as alloc function and free() as dealloc function.
  */
-Lips_Interpreter* Lips_DefaultCreateInterpreter() LIPS_COLD_FUNCTION;
+Lips_Machine* Lips_DefaultCreateMachine() LIPS_COLD_FUNCTION;
 /* Destroy an Lisp interpreter.
    Note: you don't have to call Lips_GarbageCollect before call to this function,
    it frees all resources by itself.
  */
-void Lips_DestroyInterpreter(Lips_Interpreter* interpreter) LIPS_COLD_FUNCTION;
+void Lips_DestroyMachine(Lips_Machine* interpreter) LIPS_COLD_FUNCTION;
 /* Evaluate AST
  */
-Lips_Cell Lips_Eval(Lips_Interpreter* interpreter, Lips_Cell cell) LIPS_HOT_FUNCTION;
+Lips_Cell Lips_Eval(Lips_Machine* interpreter, Lips_Cell cell) LIPS_HOT_FUNCTION;
 /* Evaluate a null-terminated string.
    filename can be null
  */
-Lips_Cell Lips_EvalString(Lips_Interpreter* interpreter, const char* str, const char* filename);
+Lips_Cell Lips_EvalString(Lips_Machine* interpreter, const char* str, const char* filename);
 /* Get string representing current error message
  */
-const char* Lips_GetError(const Lips_Interpreter* interpreter);
+const char* Lips_GetError(const Lips_Machine* interpreter);
 /* Delete unused cells.
  */
-void Lips_GarbageCollect(Lips_Interpreter* interpreter) LIPS_HOT_FUNCTION;
+void Lips_GarbageCollect(Lips_Machine* interpreter) LIPS_HOT_FUNCTION;
 
-Lips_Cell Lips_Nil(Lips_Interpreter* interpreter);
+Lips_Cell Lips_Nil(Lips_Machine* interpreter);
 /* Create Lisp integer value.
  */
-Lips_Cell Lips_NewInteger(Lips_Interpreter* interpreter, int64_t num);
+Lips_Cell Lips_NewInteger(Lips_Machine* interpreter, int64_t num);
 /* Create Lisp real number value.
  */
-Lips_Cell Lips_NewReal(Lips_Interpreter* interpreter, double num);
+Lips_Cell Lips_NewReal(Lips_Machine* interpreter, double num);
 /* Create Lisp string value.
  */
-Lips_Cell Lips_NewString(Lips_Interpreter* interpreter, const char* str);
+Lips_Cell Lips_NewString(Lips_Machine* interpreter, const char* str);
 /* Create Lisp string value.
  */
-Lips_Cell Lips_NewStringN(Lips_Interpreter* interpreter, const char* str, uint32_t n);
+Lips_Cell Lips_NewStringN(Lips_Machine* interpreter, const char* str, uint32_t n);
 /* Create Lisp symbol.
  */
-Lips_Cell Lips_NewSymbol(Lips_Interpreter* interpreter, const char* str);
+Lips_Cell Lips_NewSymbol(Lips_Machine* interpreter, const char* str);
 /* Create Lisp symbol.
  */
-Lips_Cell Lips_NewSymbolN(Lips_Interpreter* interpreter, const char* str, uint32_t n);
-Lips_Cell Lips_NewPair(Lips_Interpreter* interpreter, Lips_Cell head, Lips_Cell tail);
-Lips_Cell Lips_NewList(Lips_Interpreter* interpreter, uint32_t numCells, Lips_Cell* cells);
-Lips_Cell Lips_NewFunction(Lips_Interpreter* interpreter, Lips_Cell args, Lips_Cell body, uint8_t numargs);
-Lips_Cell Lips_NewMacro(Lips_Interpreter* interpreter, Lips_Cell args, Lips_Cell body, uint8_t numargs);
-Lips_Cell Lips_NewCFunction(Lips_Interpreter* interpreter, Lips_Func function, uint8_t numargs, void* udata);
-Lips_Cell Lips_NewCMacro(Lips_Interpreter* interpreter, Lips_Macro function, uint8_t numargs, void* udata);
+Lips_Cell Lips_NewSymbolN(Lips_Machine* interpreter, const char* str, uint32_t n);
+Lips_Cell Lips_NewPair(Lips_Machine* interpreter, Lips_Cell head, Lips_Cell tail);
+Lips_Cell Lips_NewList(Lips_Machine* interpreter, uint32_t numCells, Lips_Cell* cells);
+Lips_Cell Lips_NewFunction(Lips_Machine* interpreter, Lips_Cell args, Lips_Cell body, uint8_t numargs);
+Lips_Cell Lips_NewMacro(Lips_Machine* interpreter, Lips_Cell args, Lips_Cell body, uint8_t numargs);
+Lips_Cell Lips_NewCFunction(Lips_Machine* interpreter, Lips_Func function, uint8_t numargs, void* udata);
+Lips_Cell Lips_NewCMacro(Lips_Machine* interpreter, Lips_Macro function, uint8_t numargs, void* udata);
 uint32_t Lips_GetType(const Lips_Cell cell) LIPS_PURE_FUNCTION;
-int64_t Lips_GetInteger(Lips_Interpreter* interpreter, Lips_Cell cell);
-double Lips_GetReal(Lips_Interpreter* interpreter, Lips_Cell cell);
-const char* Lips_GetString(Lips_Interpreter* interpreter, Lips_Cell cell);
-Lips_Cell Lips_CAR(Lips_Interpreter* interpreter, Lips_Cell cell);
-Lips_Cell Lips_CDR(Lips_Interpreter* interpreter, Lips_Cell cell);
+int64_t Lips_GetInteger(Lips_Machine* interpreter, Lips_Cell cell);
+double Lips_GetReal(Lips_Machine* interpreter, Lips_Cell cell);
+const char* Lips_GetString(Lips_Machine* interpreter, Lips_Cell cell);
+Lips_Cell Lips_CAR(Lips_Machine* interpreter, Lips_Cell cell);
+Lips_Cell Lips_CDR(Lips_Machine* interpreter, Lips_Cell cell);
 /* Print cell to a buffer. Number of occupied characters is returned
  */
-uint32_t Lips_PrintCell(Lips_Interpreter* interpreter, Lips_Cell cell, char* buff, uint32_t size);
-uint32_t Lips_ListLength(Lips_Interpreter* interpreter, Lips_Cell list);
-Lips_Cell Lips_ListLastElement(Lips_Interpreter* interpreter, Lips_Cell list, uint32_t* length);
-Lips_Cell Lips_ListPushBack(Lips_Interpreter* interpreter, Lips_Cell list, Lips_Cell elem);
-Lips_Cell Lips_ListPopBack(Lips_Interpreter* interp, Lips_Cell list);
-Lips_Cell Lips_Define(Lips_Interpreter* interpreter, const char* name, Lips_Cell cell);
-Lips_Cell Lips_DefineCell(Lips_Interpreter* interpreter, Lips_Cell cell, Lips_Cell value);
-Lips_Cell Lips_Intern(Lips_Interpreter* interpreter, const char* name);
-Lips_Cell Lips_InternCell(Lips_Interpreter* interpreter, Lips_Cell cell) LIPS_HOT_FUNCTION;
-Lips_Cell Lips_Invoke(Lips_Interpreter* interpreter, Lips_Cell callable, Lips_Cell args) LIPS_HOT_FUNCTION;
+uint32_t Lips_PrintCell(Lips_Machine* interpreter, Lips_Cell cell, char* buff, uint32_t size);
+uint32_t Lips_ListLength(Lips_Machine* interpreter, Lips_Cell list);
+Lips_Cell Lips_ListLastElement(Lips_Machine* interpreter, Lips_Cell list, uint32_t* length);
+Lips_Cell Lips_ListPushBack(Lips_Machine* interpreter, Lips_Cell list, Lips_Cell elem);
+Lips_Cell Lips_ListPopBack(Lips_Machine* interp, Lips_Cell list);
+Lips_Cell Lips_Define(Lips_Machine* interpreter, const char* name, Lips_Cell cell);
+Lips_Cell Lips_DefineCell(Lips_Machine* interpreter, Lips_Cell cell, Lips_Cell value);
+Lips_Cell Lips_Intern(Lips_Machine* interpreter, const char* name);
+Lips_Cell Lips_InternCell(Lips_Machine* interpreter, Lips_Cell cell) LIPS_HOT_FUNCTION;
+Lips_Cell Lips_Invoke(Lips_Machine* interpreter, Lips_Cell callable, Lips_Cell args) LIPS_HOT_FUNCTION;
 
-const char* Lips_SetError(Lips_Interpreter* interpreter, const char* fmt, ...);
+const char* Lips_SetError(Lips_Machine* interpreter, const char* fmt, ...);
 
-void Lips_CalculateMemoryStats(Lips_Interpreter* interpreter, Lips_MemoryStats* stats);
+void Lips_CalculateMemoryStats(Lips_Machine* interpreter, Lips_MemoryStats* stats);
 
 #define Lips_IsInteger(cell) (Lips_GetType(cell) & LIPS_TYPE_INTEGER)
 #define Lips_IsReal(cell) (Lips_GetType(cell) & LIPS_TYPE_REAL)

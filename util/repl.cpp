@@ -2,10 +2,10 @@
 #include "string.h"
 #include "lips.h"
 
-Lips_Interpreter* interp;
+Lips_Machine* interp;
 
 int main(int argc, char** argv) {
-  interp = Lips_DefaultCreateInterpreter();
+  interp = Lips_DefaultCreateMachine();
   printf("Lips REPL. Type 'quit' to quit.\n");
   char buff[256];
   Lips_Cell eval;
@@ -23,6 +23,6 @@ int main(int argc, char** argv) {
     }
     printf("%s\n", buff);
   }
-  Lips_DestroyInterpreter(interp);
+  Lips_DestroyMachine(interp);
   return 0;
 }

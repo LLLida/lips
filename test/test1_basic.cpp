@@ -1,7 +1,7 @@
 #include "stdio.h"
 #include "lips.h"
 
-Lips_Interpreter* interp;
+Lips_Machine* interp;
 #define ARRAY_SIZE(arr) sizeof(arr) / sizeof(arr[0])
 
 LIPS_DECLARE_FUNCTION(my_function) {
@@ -23,7 +23,7 @@ LIPS_DECLARE_FUNCTION(printf) {
 }
 
 int main(int argc, char** argv) {
-  interp = Lips_DefaultCreateInterpreter();
+  interp = Lips_DefaultCreateMachine();
 
   Lips_Cell num = Lips_NewInteger(interp, 65);
   printf("is integer: %d\n", Lips_IsInteger(num));
@@ -119,6 +119,6 @@ int main(int argc, char** argv) {
          memoryStats.str_allocated_bytes,
          memoryStats.str_used_bytes);
 
-  Lips_DestroyInterpreter(interp);
+  Lips_DestroyMachine(interp);
   return 0;
 }
