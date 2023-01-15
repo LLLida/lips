@@ -92,6 +92,12 @@ enum {
 };
 
 typedef struct {
+  Lips_AllocFunc alloc;
+  Lips_DeallocFunc dealloc;
+  uint32_t initial_stack_size;
+} Lips_MachineCreateInfo;
+
+typedef struct {
   uint32_t allocated_bytes;
   uint32_t cell_allocated_bytes;
   uint32_t cell_used_bytes;
@@ -103,7 +109,7 @@ typedef struct {
    @param alloc function that will be used by interpreter for memory allocation
    @param dealloc function that will be used by interpreter for memory deallocation
  */
-Lips_Machine* Lips_CreateMachine(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc) LIPS_COLD_FUNCTION;
+Lips_Machine* Lips_CreateMachine(const Lips_MachineCreateInfo* info) LIPS_COLD_FUNCTION;
 /* Create a Lisp interpreter with malloc() as alloc function and free() as dealloc function.
  */
 Lips_Machine* Lips_DefaultCreateMachine() LIPS_COLD_FUNCTION;

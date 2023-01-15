@@ -380,75 +380,79 @@ struct Lips_Machine {
 /// FUNCTIONS
 
 LIPS_COLD_FUNCTION Lips_Machine*
-Lips_CreateMachine(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc)
+Lips_CreateMachine(const Lips_MachineCreateInfo* info)
 {
-  Lips_Machine* interp;
-  interp = (Lips_Machine*)alloc(sizeof(Lips_Machine));
-  if (interp == NULL) return NULL;
-  interp->alloc = alloc;
-  interp->dealloc = dealloc;
-  interp->numbuckets = 0;
-  interp->buckets = (Bucket*)alloc(sizeof(Bucket));
-  interp->allocbuckets = 1;
-  interp->numchunks = 0;
-  AddMemChunk(interp, 1024);
-  interp->str_buckets = (Bucket*)alloc(sizeof(Bucket));
-  interp->allocstr_buckets = 1;
-  interp->numstr_buckets = 0;
-  CreateStack(alloc, &interp->stack, 16*1024);
-  HashTable* env = HashTableCreate(interp->alloc, interp->dealloc, &interp->stack);
+  Lips_Machine* machine;
+  machine = (Lips_Machine*)info->alloc(sizeof(Lips_Machine));
+  if (machine == NULL) return NULL;
+  machine->alloc = info->alloc;
+  machine->dealloc = info->dealloc;
+  machine->numbuckets = 0;
+  machine->buckets = (Bucket*)machine->alloc(sizeof(Bucket));
+  machine->allocbuckets = 1;
+  machine->numchunks = 0;
+  AddMemChunk(machine, 1024);
+  machine->str_buckets = (Bucket*)machine->alloc(sizeof(Bucket));
+  machine->allocstr_buckets = 1;
+  machine->numstr_buckets = 0;
+  CreateStack(machine->alloc, &machine->stack, info->initial_stack_size);
+  HashTable* env = HashTableCreate(machine->alloc, machine->dealloc, &machine->stack);
   env->parent = STACK_INVALID_POS;
-  interp->envpos = ((uint8_t*)env - interp->stack.data);
-  interp->evalpos = STACK_INVALID_POS;
-  interp->catchpos = STACK_INVALID_POS;
+  machine->envpos = ((uint8_t*)env - machine->stack.data);
+  machine->evalpos = STACK_INVALID_POS;
+  machine->catchpos = STACK_INVALID_POS;
   // define builtins
-  interp->default_file = Lips_NewString(interp, "<eval>");
-  interp->S_nil = Lips_Define(interp, "nil", Lips_NewPair(interp, NULL, NULL));
+  machine->default_file = Lips_NewString(machine, "<eval>");
+  machine->S_nil = Lips_Define(machine, "nil", Lips_NewPair(machine, NULL, NULL));
   // important optimization: this allows to reuse string "...",
   // so anytime we encounter "..." in code we don't allocate a new string
-  Lips_Define(interp, "...", interp->S_nil);
+  Lips_Define(machine, "...", machine->S_nil);
   // t is just an integer
   // FIXME: do I need to add a new type for "t"?
-  interp->S_t = Lips_Define(interp, "t", Lips_NewInteger(interp, 1));
-  interp->S_filename = Lips_NewPair(interp, NULL, NULL);
+  machine->S_t = Lips_Define(machine, "t", Lips_NewInteger(machine, 1));
+  machine->S_filename = Lips_NewPair(machine, NULL, NULL);
 
-  LIPS_DEFINE_FUNCTION(interp, list, LIPS_NUM_ARGS_VAR, NULL);
-  LIPS_DEFINE_FUNCTION(interp, car, LIPS_NUM_ARGS_1, NULL);
-  LIPS_DEFINE_FUNCTION(interp, cdr, LIPS_NUM_ARGS_1, NULL);
-  Lips_Cell S_equal = LIPS_DEFINE_FUNCTION(interp, equal, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
-  Lips_Define(interp, "=", S_equal);
-  Lips_Cell S_nilp = LIPS_DEFINE_FUNCTION(interp, nilp, LIPS_NUM_ARGS_1, NULL);
-  Lips_Define(interp, "not", S_nilp);
-  LIPS_DEFINE_FUNCTION(interp, typeof, LIPS_NUM_ARGS_1, NULL);
-  LIPS_DEFINE_FUNCTION(interp, throw, LIPS_NUM_ARGS_1, NULL);
-  LIPS_DEFINE_FUNCTION(interp, call, LIPS_NUM_ARGS_2, NULL);
-  LIPS_DEFINE_FUNCTION(interp, format, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_FUNCTION(machine, list, LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_FUNCTION(machine, car, LIPS_NUM_ARGS_1, NULL);
+  LIPS_DEFINE_FUNCTION(machine, cdr, LIPS_NUM_ARGS_1, NULL);
+  Lips_Cell S_equal = LIPS_DEFINE_FUNCTION(machine, equal, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
+  Lips_Define(machine, "=", S_equal);
+  Lips_Cell S_nilp = LIPS_DEFINE_FUNCTION(machine, nilp, LIPS_NUM_ARGS_1, NULL);
+  Lips_Define(machine, "not", S_nilp);
+  LIPS_DEFINE_FUNCTION(machine, typeof, LIPS_NUM_ARGS_1, NULL);
+  LIPS_DEFINE_FUNCTION(machine, throw, LIPS_NUM_ARGS_1, NULL);
+  LIPS_DEFINE_FUNCTION(machine, call, LIPS_NUM_ARGS_2, NULL);
+  LIPS_DEFINE_FUNCTION(machine, format, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
 
-  LIPS_DEFINE_MACRO(interp, lambda, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
-  LIPS_DEFINE_MACRO(interp, macro, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
-  LIPS_DEFINE_MACRO(interp, define, LIPS_NUM_ARGS_2, NULL);
-  LIPS_DEFINE_MACRO(interp, quote, LIPS_NUM_ARGS_1, NULL);
-  LIPS_DEFINE_MACRO(interp, progn, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
-  LIPS_DEFINE_MACRO(interp, if, LIPS_NUM_ARGS_3|LIPS_NUM_ARGS_VAR, NULL);
-  LIPS_DEFINE_MACRO(interp, when, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
-  LIPS_DEFINE_MACRO(interp, catch, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
-  LIPS_DEFINE_MACRO(interp, intern, LIPS_NUM_ARGS_1, NULL);
+  LIPS_DEFINE_MACRO(machine, lambda, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_MACRO(machine, macro, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_MACRO(machine, define, LIPS_NUM_ARGS_2, NULL);
+  LIPS_DEFINE_MACRO(machine, quote, LIPS_NUM_ARGS_1, NULL);
+  LIPS_DEFINE_MACRO(machine, progn, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_MACRO(machine, if, LIPS_NUM_ARGS_3|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_MACRO(machine, when, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_MACRO(machine, catch, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_MACRO(machine, intern, LIPS_NUM_ARGS_1, NULL);
 
-  interp->T_integer  = Lips_NewSymbol(interp, "integer");
-  interp->T_real     = Lips_NewSymbol(interp, "real");
-  interp->T_string   = Lips_NewSymbol(interp, "string");
-  interp->T_symbol   = Lips_NewSymbol(interp, "symbol");
-  interp->T_pair     = Lips_NewSymbol(interp, "pair");
-  interp->T_function = Lips_NewSymbol(interp, "function");
-  interp->T_macro    = Lips_NewSymbol(interp, "macro");
+  machine->T_integer  = Lips_NewSymbol(machine, "integer");
+  machine->T_real     = Lips_NewSymbol(machine, "real");
+  machine->T_string   = Lips_NewSymbol(machine, "string");
+  machine->T_symbol   = Lips_NewSymbol(machine, "symbol");
+  machine->T_pair     = Lips_NewSymbol(machine, "pair");
+  machine->T_function = Lips_NewSymbol(machine, "function");
+  machine->T_macro    = Lips_NewSymbol(machine, "macro");
 
-  return interp;
+  return machine;
 }
 
 LIPS_COLD_FUNCTION Lips_Machine*
 Lips_DefaultCreateMachine()
 {
-  return Lips_CreateMachine(&DefaultAlloc, &DefaultDealloc);
+  return Lips_CreateMachine(&(Lips_MachineCreateInfo) {
+      .alloc = &DefaultAlloc,
+      .dealloc = &DefaultDealloc,
+      .initial_stack_size = 16*1024
+    });
 }
 
 LIPS_COLD_FUNCTION void
@@ -483,7 +487,7 @@ Lips_DestroyMachine(Lips_Machine* machine)
 }
 
 LIPS_HOT_FUNCTION Lips_Cell
-Lips_Eval(Lips_Machine* interp, Lips_Cell cell)
+Lips_Eval(Lips_Machine* machine, Lips_Cell cell)
 {
 #if 0
   // recursive version(easily readable)
@@ -512,31 +516,31 @@ Lips_Eval(Lips_Machine* interp, Lips_Cell cell)
   if (GET_TYPE(cell) == LIPS_TYPE_PAIR) {
     Lips_Cell ret;
     Lips_Cell name;
-    const uint32_t startpos = interp->evalpos;
-    EvalState* state = PushEvalState(interp);
+    const uint32_t startpos = machine->evalpos;
+    EvalState* state = PushEvalState(machine);
     state->sexp = cell;
   eval:
     state->flags = 0;
     state->passed_args = GET_TAIL(state->sexp);
     name = GET_HEAD(state->sexp);
     if (LIPS_UNLIKELY(name == NULL)) {
-      ret = interp->S_nil;
+      ret = machine->S_nil;
     } else {
       if (LIPS_UNLIKELY(!Lips_IsSymbol(name))) {
-        Lips_SetError(interp, "First part of evaluated s-expression always must be a symbol");
+        Lips_SetError(machine, "First part of evaluated s-expression always must be a symbol");
         goto except;
       }
-      state->callable = Lips_InternCell(interp, name);
-      if (LIPS_UNLIKELY(state->callable == interp->S_nil)) {
-        Lips_SetError(interp, "Eval: undefined symbol '%s'", GET_STR_PTR(interp, name));
+      state->callable = Lips_InternCell(machine, name);
+      if (LIPS_UNLIKELY(state->callable == machine->S_nil)) {
+        Lips_SetError(machine, "Eval: undefined symbol '%s'", GET_STR_PTR(machine, name));
         goto except;
       }
-      ES_ARG_COUNT(state) = CheckArgumentCount(interp, state->callable, state->passed_args);
+      ES_ARG_COUNT(state) = CheckArgumentCount(machine, state->callable, state->passed_args);
       if (LIPS_UNLIKELY(ES_ARG_COUNT(state) == (uint32_t)-1)) {
         goto except;
       }
       if (Lips_IsFunction(state->callable)) {
-        state->args.array = StackRequireFromBack(interp->alloc, interp->dealloc, &interp->stack,
+        state->args.array = StackRequireFromBack(machine->alloc, machine->dealloc, &machine->stack,
                                                  ES_ARG_COUNT(state) * sizeof(Lips_Cell));
         ES_LAST_ARG(state) = state->args.array;
       arg:
@@ -544,11 +548,11 @@ Lips_Eval(Lips_Machine* interp, Lips_Cell cell)
           // eval arguments
           Lips_Cell argument = GET_HEAD(state->passed_args);
           if (GET_TYPE(argument) == LIPS_TYPE_PAIR) {
-            state = PushEvalState(interp);
+            state = PushEvalState(machine);
             state->sexp = argument;
             goto eval;
           } else {
-            *ES_LAST_ARG(state) = EvalNonPair(interp, argument);
+            *ES_LAST_ARG(state) = EvalNonPair(machine, argument);
             ES_LAST_ARG(state)++;
             state->passed_args = GET_TAIL(state->passed_args);
           }
@@ -561,13 +565,13 @@ Lips_Eval(Lips_Machine* interp, Lips_Cell cell)
         Lips_Cell c = state->callable;
         if (Lips_IsFunction(c)) {
           // every function must be executed inside it's own environment
-          PushEnv(interp);
-          ret = GET_CFUNC(c).ptr(interp, ES_ARG_COUNT(state), state->args.array, GET_CFUNC(c).udata);
+          PushEnv(machine);
+          ret = GET_CFUNC(c).ptr(machine, ES_ARG_COUNT(state), state->args.array, GET_CFUNC(c).udata);
           // array of arguments no more needed; we can free it
-          FreeArgumentArray(interp, ES_ARG_COUNT(state), state->args.array);
-          PopEnv(interp);
+          FreeArgumentArray(machine, ES_ARG_COUNT(state), state->args.array);
+          PopEnv(machine);
         } else {
-          ret = GET_CMACRO(c).ptr(interp, state->args.list, GET_CMACRO(c).udata);
+          ret = GET_CMACRO(c).ptr(machine, state->args.list, GET_CMACRO(c).udata);
         }
         // fucntion returned null so need to go to latest catch
         if (LIPS_UNLIKELY(ret == NULL)) {
@@ -575,26 +579,26 @@ Lips_Eval(Lips_Machine* interp, Lips_Cell cell)
             goto code;
           }
         except:
-          if (interp->catchpos >= startpos) {
+          if (machine->catchpos >= startpos) {
             // unhandled throw
-            PopEvalState(interp);
+            PopEvalState(machine);
             return NULL;
           }
-          state = UnwindStack(interp);
-          ret = interp->throwvalue;
+          state = UnwindStack(machine);
+          ret = machine->throwvalue;
         }
       } else {
         // push a new environment
         if (ES_ARG_COUNT(state) > 0 || Lips_IsFunction(state->callable)) {
-          HashTable* env = PushEnv(interp);
+          HashTable* env = PushEnv(machine);
           ES_INC_NUM_ENVS(state);
           if (ES_ARG_COUNT(state) > 0) {
             if (Lips_IsFunction(state->callable)) {
-              DefineArgumentArray(interp, state->callable, ES_ARG_COUNT(state), state->args.array);
+              DefineArgumentArray(machine, state->callable, ES_ARG_COUNT(state), state->args.array);
               // array of arguments no more needed; we can free it
-              FreeArgumentArray(interp, ES_ARG_COUNT(state), state->args.array);
+              FreeArgumentArray(machine, ES_ARG_COUNT(state), state->args.array);
             } else {
-              DefineArgumentList(interp, state->callable, state->args.list);
+              DefineArgumentList(machine, state->callable, state->args.list);
               env->flags |= HASH_TABLE_CONSTANT_FLAG;
             }
           }
@@ -607,18 +611,18 @@ Lips_Eval(Lips_Machine* interp, Lips_Cell cell)
           Lips_Cell expression = GET_HEAD(ES_CODE(state));
           if (GET_TYPE(expression) == LIPS_TYPE_PAIR) {
             // TODO: implement tail call optimization
-            state = PushEvalState(interp);
+            state = PushEvalState(machine);
             state->sexp = expression;
             goto eval;
           } else {
-            ret = EvalNonPair(interp, expression);
+            ret = EvalNonPair(machine, expression);
           }
           ES_CODE(state) = GET_TAIL(ES_CODE(state));
         }
       }
     }
-    state = PopEvalState(interp);
-    if (interp->evalpos != startpos) {
+    state = PopEvalState(machine);
+    if (machine->evalpos != startpos) {
       switch (ES_STAGE(state)) {
       case ES_STAGE_EVALUATING_ARGS:
         *ES_LAST_ARG(state) = ret;
@@ -632,7 +636,7 @@ Lips_Eval(Lips_Machine* interp, Lips_Cell cell)
     }
     return ret;
   } else {
-    return EvalNonPair(interp, cell);
+    return EvalNonPair(machine, cell);
   }
 #endif
   return cell;
@@ -958,9 +962,9 @@ Lips_PrintCell(Lips_Machine* machine, Lips_Cell cell, char* buff, uint32_t size)
 }
 
 uint32_t
-Lips_ListLength(Lips_Machine* interp, Lips_Cell list)
+Lips_ListLength(Lips_Machine* machine, Lips_Cell list)
 {
-  (void)interp;
+  (void)machine;
   TYPE_CHECK_FORCED(LIPS_TYPE_PAIR, list);
   uint32_t count = 0;
   if (GET_HEAD(list) == NULL) {
@@ -999,24 +1003,24 @@ Lips_ListLastElement(Lips_Machine* machine, Lips_Cell list, uint32_t* length)
 }
 
 Lips_Cell
-Lips_ListPushBack(Lips_Machine* interp, Lips_Cell list, Lips_Cell elem)
+Lips_ListPushBack(Lips_Machine* machine, Lips_Cell list, Lips_Cell elem)
 {
-  TYPE_CHECK(interp, LIPS_TYPE_PAIR, list);
+  TYPE_CHECK(machine, LIPS_TYPE_PAIR, list);
   if (GET_HEAD(list) == NULL) {
     GET_HEAD(list) = elem;
   } else {
     while (GET_TAIL(list) != NULL) {
       list = GET_TAIL(list);
     }
-    GET_TAIL(list) = Lips_NewPair(interp, elem, NULL);
+    GET_TAIL(list) = Lips_NewPair(machine, elem, NULL);
   }
   return list;
 }
 
 Lips_Cell
-Lips_ListPopBack(Lips_Machine* interp, Lips_Cell list)
+Lips_ListPopBack(Lips_Machine* machine, Lips_Cell list)
 {
-  TYPE_CHECK(interp, LIPS_TYPE_PAIR, list);
+  TYPE_CHECK(machine, LIPS_TYPE_PAIR, list);
   Lips_Cell ret;
   if (GET_TAIL(list) == NULL) {
     assert(GET_HEAD(list) && "empty list");
@@ -1241,14 +1245,14 @@ DestroyCell(Lips_Machine* machine, Lips_Cell cell) {
 }
 
 StringData*
-StringCreate(Lips_Machine* interp, const char* str, uint32_t n)
+StringCreate(Lips_Machine* machine, const char* str, uint32_t n)
 {
-  Bucket* bucket = FindBucketForString(interp);
+  Bucket* bucket = FindBucketForString(machine);
   StringData* data = BucketNewString(bucket);
-  data->flags = STR_DATA_MAKE_BUCKET_INDEX(bucket - interp->str_buckets);
+  data->flags = STR_DATA_MAKE_BUCKET_INDEX(bucket - machine->str_buckets);
   uint32_t bytes = n+1+sizeof(StringData*);
-  MemChunk* chunk = FindChunkForString(interp, bytes);
-  data->flags |= STR_DATA_MAKE_CHUNK_INDEX(chunk - interp->chunks);
+  MemChunk* chunk = FindChunkForString(machine, bytes);
+  data->flags |= STR_DATA_MAKE_CHUNK_INDEX(chunk - machine->chunks);
   char* ptr = ChunkFindSpace(chunk, &bytes);
   *(StringData**)(ptr) = data;
   chunk->used += n+1;
@@ -1262,14 +1266,14 @@ StringCreate(Lips_Machine* interp, const char* str, uint32_t n)
 }
 
 StringData*
-StringCreateWithHash(Lips_Machine* interp, const char* str, uint32_t n, uint32_t hash)
+StringCreateWithHash(Lips_Machine* machine, const char* str, uint32_t n, uint32_t hash)
 {
-  Bucket* bucket = FindBucketForString(interp);
+  Bucket* bucket = FindBucketForString(machine);
   StringData* data = BucketNewString(bucket);
-  data->flags = STR_DATA_MAKE_BUCKET_INDEX(bucket - interp->str_buckets);
+  data->flags = STR_DATA_MAKE_BUCKET_INDEX(bucket - machine->str_buckets);
   uint32_t bytes = n+1+sizeof(StringData*);
-  MemChunk* chunk = FindChunkForString(interp, bytes);
-  data->flags |= STR_DATA_MAKE_CHUNK_INDEX(chunk - interp->chunks);
+  MemChunk* chunk = FindChunkForString(machine, bytes);
+  data->flags |= STR_DATA_MAKE_CHUNK_INDEX(chunk - machine->chunks);
   char* ptr = ChunkFindSpace(chunk, &bytes);
   *(StringData**)(ptr) = data;
   chunk->used += n+1;
@@ -1283,12 +1287,12 @@ StringCreateWithHash(Lips_Machine* interp, const char* str, uint32_t n, uint32_t
 }
 
 void
-StringDestroy(Lips_Machine* interp, StringData* str)
+StringDestroy(Lips_Machine* machine, StringData* str)
 {
   STR_DATA_REF_DEC(str);
   if (STR_DATA_REF_COUNT(str) > 0)
     return;
-  MemChunk* chunk = &interp->chunks[STR_DATA_CHUNK_INDEX(str)];
+  MemChunk* chunk = &machine->chunks[STR_DATA_CHUNK_INDEX(str)];
   char* ptr = STR_DATA_PTR(chunk, str) - sizeof(StringData*);
   assert(ptr >= chunk->data && ptr + STR_DATA_ALLOCATED(str) <= chunk->data + chunk->numbytes);
   if (chunk->deletions % 128 == 127) {
@@ -1298,7 +1302,7 @@ StringDestroy(Lips_Machine* interp, StringData* str)
   chunk->deletions++;
   PushRegion(chunk, ptr-chunk->data, STR_DATA_ALLOCATED(str));
   chunk->used -= STR_DATA_LENGTH(str)+1;
-  Bucket* bucket = &interp->str_buckets[STR_DATA_BUCKET_INDEX(str)];
+  Bucket* bucket = &machine->str_buckets[STR_DATA_BUCKET_INDEX(str)];
   BucketDeleteString(bucket, str);
 }
 
@@ -1317,11 +1321,11 @@ StringEqual(Lips_Machine* machine, const StringData* lhs, const StringData* rhs)
 }
 
 const char*
-GDB_lips_to_c_string(Lips_Machine* interp, Lips_Cell cell)
+GDB_lips_to_c_string(Lips_Machine* machine, Lips_Cell cell)
 {
   // FIXME: this is terrible
-  char* buff = interp->errbuff + 512;
-  Lips_PrintCell(interp, cell, buff, 512);
+  char* buff = machine->errbuff + 512;
+  Lips_PrintCell(machine, cell, buff, 512);
   return buff;
 }
 
@@ -1438,26 +1442,26 @@ ParseNumber(Lips_Machine* machine, const Token* token) {
 }
 
 LIPS_HOT_FUNCTION Lips_Cell
-NewCell(Lips_Machine* interp)
+NewCell(Lips_Machine* machine)
 {
-  for (uint32_t i = interp->numbuckets; i > 0; i--)
-    if (interp->buckets[i-1].size < BUCKET_SIZE) {
+  for (uint32_t i = machine->numbuckets; i > 0; i--)
+    if (machine->buckets[i-1].size < BUCKET_SIZE) {
       // we found a bucket with available storage, use it
-      return BucketNewCell(&interp->buckets[i-1]);
+      return BucketNewCell(&machine->buckets[i-1]);
     }
-  if (interp->numbuckets == interp->allocbuckets) {
+  if (machine->numbuckets == machine->allocbuckets) {
     // we're out of storage for buckets, allocate more
-    Bucket* new_buckets = interp->alloc(interp->allocbuckets * 2);
+    Bucket* new_buckets = machine->alloc(machine->allocbuckets * 2);
     if (!new_buckets) return NULL;
-    memcpy(new_buckets, interp->buckets, interp->numbuckets * sizeof(Bucket));
-    interp->buckets = new_buckets;
-    interp->dealloc(new_buckets, sizeof(Bucket) * interp->allocbuckets);
-    interp->allocbuckets = interp->allocbuckets * 2;
+    memcpy(new_buckets, machine->buckets, machine->numbuckets * sizeof(Bucket));
+    machine->buckets = new_buckets;
+    machine->dealloc(new_buckets, sizeof(Bucket) * machine->allocbuckets);
+    machine->allocbuckets = machine->allocbuckets * 2;
   }
   // push back a new bucket
-  Bucket* new_bucket = &interp->buckets[interp->numbuckets];
-  CreateBucket(interp->alloc, new_bucket, sizeof(Lips_Value));
-  interp->numbuckets++;
+  Bucket* new_bucket = &machine->buckets[machine->numbuckets];
+  CreateBucket(machine->alloc, new_bucket, sizeof(Lips_Value));
+  machine->numbuckets++;
   return BucketNewCell(new_bucket);
 }
 
@@ -1861,15 +1865,15 @@ HashTableDestroy(Stack* stack, HashTable* ht)
 }
 
 void
-HashTableReserve(Lips_Machine* interp, HashTable* ht, uint32_t capacity)
+HashTableReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity)
 {
   assert(capacity > ht->allocated);
   if (HASH_TABLE_GET_SIZE(ht) == 0) {
-    assert(StackRelease(&interp->stack, HASH_TABLE_DATA(ht)) == ht->allocated * sizeof(Node));
+    assert(StackRelease(&machine->stack, HASH_TABLE_DATA(ht)) == ht->allocated * sizeof(Node));
   }
   uint32_t preallocated = ht->allocated;
   ht->allocated = capacity;
-  Node* nodes = StackRequire(interp->alloc, interp->dealloc, &interp->stack, capacity * sizeof(Node));
+  Node* nodes = StackRequire(machine->alloc, machine->dealloc, &machine->stack, capacity * sizeof(Node));
   nodes += capacity - preallocated;
   Node* data = HASH_TABLE_DATA(ht);
   memcpy(nodes, data, preallocated * sizeof(Node));
@@ -1881,21 +1885,21 @@ HashTableReserve(Lips_Machine* interp, HashTable* ht, uint32_t capacity)
     HASH_TABLE_SET_SIZE(ht, 0);
     for (uint32_t i = 0; i < preallocated; i++) {
       if (NODE_VALID(nodes[i])) {
-        HashTableInsert(interp, ht, nodes[i].key, nodes[i].value);
+        HashTableInsert(machine, ht, nodes[i].key, nodes[i].value);
         if (HASH_TABLE_GET_SIZE(ht) == oldSize) break;
       }
     }
-    assert(StackRelease(&interp->stack, data + capacity) == preallocated * sizeof(Node));
+    assert(StackRelease(&machine->stack, data + capacity) == preallocated * sizeof(Node));
   }
 }
 
 Lips_Cell*
-HashTableInsert(Lips_Machine* interp,
+HashTableInsert(Lips_Machine* machine,
                 HashTable* ht, StringData* key, Lips_Cell value) {
   assert(value && "Can not insert null");
   if (HASH_TABLE_GET_SIZE(ht) == ht->allocated) {
     uint32_t sz = (HASH_TABLE_GET_SIZE(ht) == 0) ? 1 : (HASH_TABLE_GET_SIZE(ht)<<1);
-    HashTableReserve(interp, ht, sz);
+    HashTableReserve(machine, ht, sz);
   }
   Node* data = HASH_TABLE_DATA(ht);
   uint32_t id = key->hash % ht->allocated;
@@ -1903,7 +1907,7 @@ HashTableInsert(Lips_Machine* interp,
     // Hash table already has this element
     if (STR_DATA_LENGTH(key) == STR_DATA_LENGTH(data[id].key) &&
         key->hash == data[id].key->hash &&
-        strcmp(STR_DATA_PTR2(interp, data[id].key), STR_DATA_PTR2(interp, key)) == 0) {
+        strcmp(STR_DATA_PTR2(machine, data[id].key), STR_DATA_PTR2(machine, key)) == 0) {
       return NULL;
     }
     id = (id+1) % ht->allocated;
@@ -1944,7 +1948,7 @@ HashTableSearchWithHash(Lips_Machine* machine, const HashTable* ht, uint32_t has
 }
 
 StringData*
-HashTableSearchKey(Lips_Machine* interp, const HashTable* ht, uint32_t hash, const char* key, uint32_t n)
+HashTableSearchKey(Lips_Machine* machine, const HashTable* ht, uint32_t hash, const char* key, uint32_t n)
 {
   Node* data = HASH_TABLE_DATA(ht);
   uint32_t i = 0;
@@ -1954,7 +1958,7 @@ HashTableSearchKey(Lips_Machine* interp, const HashTable* ht, uint32_t hash, con
     if (NODE_VALID(data[id])) {
       StringData* val = data[id].key;
       if (hash == val->hash &&
-          strncmp(STR_DATA_PTR2(interp, val), key, n) == 0)
+          strncmp(STR_DATA_PTR2(machine, val), key, n) == 0)
         return data[id].key;
       i++;
       // linear probing
@@ -2194,53 +2198,53 @@ PushRegion(MemChunk* chunk, uint32_t offset, uint32_t size)
 }
 
 Bucket*
-FindBucketForString(Lips_Machine* interp)
+FindBucketForString(Lips_Machine* machine)
 {
-  for (uint32_t i = interp->numstr_buckets; i > 0; i--)
-    if (interp->str_buckets[i-1].size < BUCKET_SIZE) {
-      return &interp->str_buckets[i-1];
+  for (uint32_t i = machine->numstr_buckets; i > 0; i--)
+    if (machine->str_buckets[i-1].size < BUCKET_SIZE) {
+      return &machine->str_buckets[i-1];
     }
-  if (interp->numstr_buckets == interp->allocstr_buckets) {
+  if (machine->numstr_buckets == machine->allocstr_buckets) {
     // we're out of storage for buckets, allocate more
-    Bucket* new_buckets = interp->alloc(interp->allocstr_buckets * 2);
+    Bucket* new_buckets = machine->alloc(machine->allocstr_buckets * 2);
     assert(new_buckets);
-    memcpy(new_buckets, interp->str_buckets, interp->numstr_buckets * sizeof(Bucket));
-    interp->str_buckets = new_buckets;
-    interp->dealloc(new_buckets, sizeof(Bucket) * interp->allocstr_buckets);
-    interp->allocstr_buckets = interp->allocstr_buckets * 2;
+    memcpy(new_buckets, machine->str_buckets, machine->numstr_buckets * sizeof(Bucket));
+    machine->str_buckets = new_buckets;
+    machine->dealloc(new_buckets, sizeof(Bucket) * machine->allocstr_buckets);
+    machine->allocstr_buckets = machine->allocstr_buckets * 2;
   }
-  Bucket* new_bucket = &interp->str_buckets[interp->numstr_buckets];
-  CreateBucket(interp->alloc, new_bucket, sizeof(StringData));
-  interp->numstr_buckets++;
+  Bucket* new_bucket = &machine->str_buckets[machine->numstr_buckets];
+  CreateBucket(machine->alloc, new_bucket, sizeof(StringData));
+  machine->numstr_buckets++;
   return new_bucket;
 }
 
 MemChunk*
-FindChunkForString(Lips_Machine* interp, uint32_t n)
+FindChunkForString(Lips_Machine* machine, uint32_t n)
 {
   // try to find a chunk with enough space
-  for (uint32_t i = 0; i < interp->numchunks; i++) {
-    if (interp->chunks[i].available >= n) {
-      return &interp->chunks[i];
+  for (uint32_t i = 0; i < machine->numchunks; i++) {
+    if (machine->chunks[i].available >= n) {
+      return &machine->chunks[i];
     }
   }
   // try to add a new chunk
   uint32_t sz = (n < 1024) ? 1024 : n;
-  if (interp->numchunks < MAX_CHUNKS) {
-    return AddMemChunk(interp, sz);
+  if (machine->numchunks < MAX_CHUNKS) {
+    return AddMemChunk(machine, sz);
   }
   // find smallest chunk and reallocate it
-  MemChunk* chunk = &interp->chunks[0];
-  for (uint32_t i = 1; i < interp->numchunks; i++) {
-    if (interp->chunks[i].numbytes < chunk->numbytes) {
-      chunk = &interp->chunks[i];
+  MemChunk* chunk = &machine->chunks[0];
+  for (uint32_t i = 1; i < machine->numchunks; i++) {
+    if (machine->chunks[i].numbytes < chunk->numbytes) {
+      chunk = &machine->chunks[i];
     }
   }
   // reallocate chunk
-  char* new_data = interp->alloc(chunk->numbytes + sz);
+  char* new_data = machine->alloc(chunk->numbytes + sz);
   assert(new_data);
   memcpy(new_data, chunk->data, chunk->numbytes);
-  interp->dealloc(chunk->data, chunk->numbytes);
+  machine->dealloc(chunk->data, chunk->numbytes);
   chunk->data = new_data;
   // push a region to the end
   PushRegion(chunk, chunk->numbytes, sz);
