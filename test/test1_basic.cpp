@@ -86,7 +86,12 @@ int main(int argc, char** argv) {
     "(catch (3 \"kitty\" 3.141592))",
     "(catch (lady gaga))",
     "(define catch2 (macro (...) (call (quote catch) ...)))",
-    "(catch2 (car (list 2 3)) (throw \"food\") (list 73 73 73))"
+    "(catch2 (car (list 2 3)) (throw \"food\") (list 73 73 73))",
+    "(format \"The answer is %d\" 887)",
+    "(format \"exception No. %d: %s\" 10.05 (catch (poker-face \"Welcome to Lisp\")))",
+    "(format \"printing an s-expression: %S\" (list 65 (quote hooker) (tail-macro 12 34 56) ()))",
+    "(format \"printing many integers: %d %d %d %d %d %d %d %d %d\" 1 2 3 4 5 6 7 8 9 )",
+    "(format \"some-validation: %d\")"
   };
   for (int i = 0; i < ARRAY_SIZE(test_strings); i++) {
     const char* test_string = test_strings[i];

@@ -164,6 +164,7 @@ static LIPS_DECLARE_FUNCTION(nilp);
 static LIPS_DECLARE_FUNCTION(typeof);
 static LIPS_DECLARE_FUNCTION(throw);
 static LIPS_DECLARE_FUNCTION(call);
+static LIPS_DECLARE_FUNCTION(format);
 
 static LIPS_DECLARE_MACRO(lambda);
 static LIPS_DECLARE_MACRO(macro);
@@ -255,7 +256,6 @@ struct Lips_Value {
 #define GET_NUMARGS(cell) (((cell)->type >> 8) & 255)
 #define GET_INTEGER(cell) (cell)->data.integer
 #define GET_REAL(cell) (cell)->data.real
-#define GET_STRING(cell) (cell)->data.str->ptr
 #define GET_HEAD(cell) (cell)->data.list.head
 #define GET_TAIL(cell) (cell)->data.list.tail
 #define GET_CFUNC(cell) (cell)->data.cfunc
@@ -422,6 +422,7 @@ Lips_CreateMachine(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc)
   LIPS_DEFINE_FUNCTION(interp, typeof, LIPS_NUM_ARGS_1, NULL);
   LIPS_DEFINE_FUNCTION(interp, throw, LIPS_NUM_ARGS_1, NULL);
   LIPS_DEFINE_FUNCTION(interp, call, LIPS_NUM_ARGS_2, NULL);
+  LIPS_DEFINE_FUNCTION(interp, format, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
 
   LIPS_DEFINE_MACRO(interp, lambda, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(interp, macro, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
@@ -535,7 +536,6 @@ Lips_Eval(Lips_Machine* interp, Lips_Cell cell)
         goto except;
       }
       if (Lips_IsFunction(state->callable)) {
-        // TODO: manage variable number of arguments
         state->args.array = StackRequireFromBack(interp->alloc, interp->dealloc, &interp->stack,
                                                  ES_ARG_COUNT(state) * sizeof(Lips_Cell));
         ES_LAST_ARG(state) = state->args.array;
@@ -2312,7 +2312,6 @@ DefineArgumentArray(Lips_Machine* interpreter, Lips_Cell callable,
     if (GET_HEAD(argnames)) {
       Lips_DefineCell(interpreter, GET_HEAD(argnames), *argvalues);
     }
-    argvalues++;
     argnames = GET_TAIL(argnames);
   }
   if (GET_NUMARGS(callable) & LIPS_NUM_ARGS_VAR) {
@@ -2623,6 +2622,58 @@ LIPS_DECLARE_FUNCTION(call)
   TYPE_CHECK(interpreter, LIPS_TYPE_SYMBOL, args[0]);
   TYPE_CHECK(interpreter, LIPS_TYPE_PAIR, args[1]);
   return Lips_Invoke(interpreter, args[0], args[1]);
+}
+
+LIPS_DECLARE_FUNCTION(format)
+{
+  (void)udata;
+  TYPE_CHECK(interpreter, LIPS_TYPE_STRING, args[0]);
+  const char* fmt = GET_STR_PTR(interpreter, args[0]);
+  char initial_buff[1024];
+  uint32_t len = strlen(fmt);
+  // TODO: grow buffer if we're out of initial_buff
+  char* buff = initial_buff;
+  Lips_Cell* commands = args+1;
+  for (uint32_t i = 0; i < len; i++) {
+    if (fmt[i] == '%') {
+      i++;
+      if (fmt[i] == '\0') {
+        LIPS_THROW_ERROR(interpreter, "format string ends in middle of format specifier");
+      }
+      if (numargs == 0) {
+        LIPS_THROW_ERROR(interpreter, "not enough arguments for format string");
+      }
+      Lips_Cell command = *commands;
+      switch (fmt[i]) {
+      case 's':
+        TYPE_CHECK(interpreter, LIPS_TYPE_STRING, command);
+        buff += sprintf(buff, "%s", GET_STR_PTR(interpreter, command));
+        break;
+      case 'd':
+        if (Lips_IsInteger(command)) {
+          buff += sprintf(buff, "%ld", GET_INTEGER(command));
+        } else {
+          TYPE_CHECK(interpreter, LIPS_TYPE_REAL, command);
+          buff += sprintf(buff, "%f", GET_REAL(command));
+        }
+        break;
+      case 'S':
+        // We don't even check if we have overflow
+        // hope we will fix it soon
+        buff += Lips_PrintCell(interpreter, command, buff, sizeof(initial_buff) - (buff - initial_buff));
+        break;
+      default:
+        LIPS_THROW_ERROR(interpreter, "invalid format operation %%%c", fmt[i]);
+      }
+      commands++;
+      numargs--;
+    } else {
+      // write symbol to the buffer
+      *buff = fmt[i];
+      buff++;
+    }
+  }
+  return Lips_NewStringN(interpreter, initial_buff, sizeof(initial_buff) - (buff - initial_buff));
 }
 
 LIPS_DECLARE_MACRO(lambda)
