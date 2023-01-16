@@ -127,7 +127,7 @@ static HashTable* HashTableCreate(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc
                                   Stack* stack);
 static void HashTableDestroy(Stack* stack, HashTable* ht);
 static void HashTableReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity);
-static Lips_Cell* HashTableInsert(Lips_Machine* itnerpreter,
+static Lips_Cell* HashTableInsert(Lips_Machine* machine,
                                   HashTable* ht, StringData* key, Lips_Cell value);
 static Lips_Cell* HashTableSearch(Lips_Machine* interp, const HashTable* ht, const char* key);
 static Lips_Cell* HashTableSearchWithHash(Lips_Machine* interp, const HashTable* ht, uint32_t hash, const char* key);
@@ -309,6 +309,7 @@ struct EvalState {
 #define ES_STAGE(es) ((es)->flags & 1)
 #define ES_INC_NUM_ENVS(es) ((es)->flags += 2)
 #define ES_SET_STAGE(es, stage) (es)->flags = ((es)->flags & ~1) | stage
+#define ES_PASSED_ARGS(es) (es)->passed_args
 #define ES_ARG_COUNT(es) (es)->data.args.count
 #define ES_LAST_ARG(es) (es)->data.args.last
 #define ES_CODE(es) (es)->data.exec.code
@@ -521,7 +522,7 @@ Lips_Eval(Lips_Machine* machine, Lips_Cell cell)
     state->sexp = cell;
   eval:
     state->flags = 0;
-    state->passed_args = GET_TAIL(state->sexp);
+    ES_PASSED_ARGS(state) = GET_TAIL(state->sexp);
     name = GET_HEAD(state->sexp);
     if (LIPS_UNLIKELY(name == NULL)) {
       ret = machine->S_nil;
@@ -535,7 +536,7 @@ Lips_Eval(Lips_Machine* machine, Lips_Cell cell)
         Lips_SetError(machine, "Eval: undefined symbol '%s'", GET_STR_PTR(machine, name));
         goto except;
       }
-      ES_ARG_COUNT(state) = CheckArgumentCount(machine, state->callable, state->passed_args);
+      ES_ARG_COUNT(state) = CheckArgumentCount(machine, state->callable, ES_PASSED_ARGS(state));
       if (LIPS_UNLIKELY(ES_ARG_COUNT(state) == (uint32_t)-1)) {
         goto except;
       }
@@ -544,9 +545,9 @@ Lips_Eval(Lips_Machine* machine, Lips_Cell cell)
                                                  ES_ARG_COUNT(state) * sizeof(Lips_Cell));
         ES_LAST_ARG(state) = state->args.array;
       arg:
-        while (state->passed_args) {
+        while (ES_PASSED_ARGS(state)) {
           // eval arguments
-          Lips_Cell argument = GET_HEAD(state->passed_args);
+          Lips_Cell argument = GET_HEAD(ES_PASSED_ARGS(state));
           if (GET_TYPE(argument) == LIPS_TYPE_PAIR) {
             state = PushEvalState(machine);
             state->sexp = argument;
@@ -554,11 +555,11 @@ Lips_Eval(Lips_Machine* machine, Lips_Cell cell)
           } else {
             *ES_LAST_ARG(state) = EvalNonPair(machine, argument);
             ES_LAST_ARG(state)++;
-            state->passed_args = GET_TAIL(state->passed_args);
+            ES_PASSED_ARGS(state) = GET_TAIL(ES_PASSED_ARGS(state));
           }
         }
       } else {
-        state->args.list = state->passed_args;
+        state->args.list = ES_PASSED_ARGS(state);
       }
       if (GET_TYPE(state->callable) & ((LIPS_TYPE_C_FUNCTION^LIPS_TYPE_FUNCTION)|
                                        (LIPS_TYPE_C_MACRO^LIPS_TYPE_MACRO))) {
@@ -627,7 +628,7 @@ Lips_Eval(Lips_Machine* machine, Lips_Cell cell)
       case ES_STAGE_EVALUATING_ARGS:
         *ES_LAST_ARG(state) = ret;
         ES_LAST_ARG(state)++;
-        state->passed_args = GET_TAIL(state->passed_args);
+        ES_PASSED_ARGS(state) = GET_TAIL(ES_PASSED_ARGS(state));
         goto arg;
       case ES_STAGE_EXECUTING_CODE:
         ES_CODE(state) = GET_TAIL(ES_CODE(state));
@@ -738,6 +739,20 @@ Lips_NewSymbolN(Lips_Machine* machine, const char* str, uint32_t n)
  skip:
   GET_STR(cell) = data;
   STR_DATA_REF_INC(GET_STR(cell));
+  return cell;
+}
+
+Lips_Cell
+Lips_NewKeyword(Lips_Machine* machine, const char* str)
+{
+  return Lips_NewKeywordN(machine, str, strlen(str));
+}
+
+Lips_Cell
+Lips_NewKeywordN(Lips_Machine* machine, const char* str, uint32_t n)
+{
+  Lips_Cell cell = Lips_NewSymbolN(machine, str, n);
+  cell->type = LIPS_TYPE_KEYWORD;
   return cell;
 }
 
@@ -872,6 +887,9 @@ Lips_PrintCell(Lips_Machine* machine, Lips_Cell cell, char* buff, uint32_t size)
         case LIPS_TYPE_SYMBOL:
           PRINT("%s", GET_STR_PTR(machine, GET_HEAD(cell)));
           break;
+        case LIPS_TYPE_KEYWORD:
+          PRINT(":%s", GET_STR_PTR(machine, GET_HEAD(cell)));
+          break;
         case LIPS_TYPE_PAIR:
           PRINT("(");
           prev = StackRequire(machine->alloc, machine->dealloc,
@@ -935,6 +953,9 @@ Lips_PrintCell(Lips_Machine* machine, Lips_Cell cell, char* buff, uint32_t size)
       break;
     case LIPS_TYPE_SYMBOL:
       PRINT("%s", GET_STR_PTR(machine, cell));
+      break;
+    case LIPS_TYPE_KEYWORD:
+      PRINT(":%s", GET_STR_PTR(machine, cell));
       break;
     case LIPS_TYPE_FUNCTION:
     case LIPS_TYPE_C_FUNCTION: {
@@ -1236,6 +1257,7 @@ DestroyCell(Lips_Machine* machine, Lips_Cell cell) {
     break;
   case LIPS_TYPE_STRING:
   case LIPS_TYPE_SYMBOL:
+  case LIPS_TYPE_KEYWORD:
     StringDestroy(machine, GET_STR(cell));
     break;
   case LIPS_TYPE_PAIR:
@@ -1517,6 +1539,10 @@ GenerateAST(Lips_Machine* machine, Parser* parser)
         cell = Lips_NewStringN(machine,
                                parser->currtok.str+1, parser->currtok.length-2);
         break;
+      case ':':
+        cell = Lips_NewKeywordN(machine,
+                                parser->currtok.str+1, parser->currtok.length-1);
+        break;
       default:
         if (Lips_IsTokenNumber(&parser->currtok)) {
           cell = ParseNumber(machine, &parser->currtok);
@@ -1563,6 +1589,10 @@ GenerateAST(Lips_Machine* machine, Parser* parser)
     case '"':
       GET_HEAD(cell) = Lips_NewStringN(machine,
                                        parser->currtok.str+1, parser->currtok.length-2);
+      break;
+    case ':':
+      GET_HEAD(cell) = Lips_NewKeywordN(machine,
+                                        parser->currtok.str+1, parser->currtok.length-1);
       break;
     default:
       if (Lips_IsTokenNumber(&parser->currtok)) {
@@ -1791,8 +1821,7 @@ MachineEnv(Lips_Machine* machine)
 HashTable*
 PushEnv(Lips_Machine* machine)
 {
-  HashTable* env = HashTableCreate(machine->alloc, machine->dealloc,
-                                   &machine->stack);
+  HashTable* env = HashTableCreate(machine->alloc, machine->dealloc, &machine->stack);
   env->parent = machine->envpos;
   machine->envpos = (uint8_t*)env - machine->stack.data;
   return env;
@@ -2314,7 +2343,7 @@ DefineArgumentArray(Lips_Machine* machine, Lips_Cell callable,
   uint32_t count = (GET_NUMARGS(callable) & (LIPS_NUM_ARGS_VAR-1));
   for (uint32_t i = 0; i < count; i++) {
     if (GET_HEAD(argnames)) {
-      Lips_DefineCell(machine, GET_HEAD(argnames), *argvalues);
+      Lips_DefineCell(machine, GET_HEAD(argnames), argvalues[i]);
     }
     argnames = GET_TAIL(argnames);
   }
@@ -2338,6 +2367,7 @@ EvalNonPair(Lips_Machine* machine, Lips_Cell cell)
   case LIPS_TYPE_INTEGER:
   case LIPS_TYPE_REAL:
   case LIPS_TYPE_STRING:
+  case LIPS_TYPE_KEYWORD:
   case LIPS_TYPE_FUNCTION:
   case LIPS_TYPE_C_FUNCTION:
   case LIPS_TYPE_MACRO:
@@ -2392,6 +2422,7 @@ Mark(Lips_Machine* machine)
       case LIPS_TYPE_REAL:
       case LIPS_TYPE_STRING:
       case LIPS_TYPE_SYMBOL:
+      case LIPS_TYPE_KEYWORD:
       case LIPS_TYPE_C_FUNCTION:
       case LIPS_TYPE_C_MACRO:
       case LIPS_TYPE_USER:

@@ -91,7 +91,10 @@ int main(int argc, char** argv) {
     "(format \"exception No. %d: %s\" 10.05 (catch (poker-face \"Welcome to Lisp\")))",
     "(format \"printing an s-expression: %S\" (list 65 (quote hooker) (tail-macro 12 34 56) ()))",
     "(format \"printing many integers: %d %d %d %d %d %d %d %d %d\" 1 2 3 4 5 6 7 8 9 )",
-    "(format \"some-validation: %d\")"
+    "(format \"some-validation: %d\")",
+    ":some-keyword",
+    "(tail)",
+    "(tail :a :m :o :n \"g us\")"
   };
   for (int i = 0; i < ARRAY_SIZE(test_strings); i++) {
     const char* test_string = test_strings[i];

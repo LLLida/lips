@@ -62,6 +62,8 @@ enum {
   LIPS_TYPE_STRING = 1<<2,
   // symbol
   LIPS_TYPE_SYMBOL = 1<<3,
+  // keyword
+  LIPS_TYPE_KEYWORD = LIPS_TYPE_SYMBOL+1,
   // listx
   LIPS_TYPE_PAIR = 1<<4,
   // function defined in Lips code
@@ -72,7 +74,7 @@ enum {
   LIPS_TYPE_MACRO = 1<<6,
   // macro defined in C code
   LIPS_TYPE_C_MACRO = (1<<6)+1,
-  // user-defined type
+  // TODO: user-defined type
   LIPS_TYPE_USER = 1<<7,
 };
 
@@ -151,6 +153,8 @@ Lips_Cell Lips_NewSymbol(Lips_Machine* machine, const char* str);
 /* Create Lisp symbol.
  */
 Lips_Cell Lips_NewSymbolN(Lips_Machine* machine, const char* str, uint32_t n);
+Lips_Cell Lips_NewKeyword(Lips_Machine* machine, const char* str);
+Lips_Cell Lips_NewKeywordN(Lips_Machine* machine, const char* str, uint32_t n);
 Lips_Cell Lips_NewPair(Lips_Machine* machine, Lips_Cell head, Lips_Cell tail);
 Lips_Cell Lips_NewList(Lips_Machine* machine, uint32_t numCells, Lips_Cell* cells);
 Lips_Cell Lips_NewFunction(Lips_Machine* machine, Lips_Cell args, Lips_Cell body, uint8_t numargs);
@@ -180,12 +184,12 @@ const char* Lips_SetError(Lips_Machine* machine, const char* fmt, ...);
 
 void Lips_CalculateMemoryStats(Lips_Machine* machine, Lips_MemoryStats* stats);
 
-#define Lips_IsInteger(cell) (Lips_GetType(cell) & LIPS_TYPE_INTEGER)
-#define Lips_IsReal(cell) (Lips_GetType(cell) & LIPS_TYPE_REAL)
-#define Lips_IsString(cell) (Lips_GetType(cell) & LIPS_TYPE_STRING)
-#define Lips_IsSymbol(cell) (Lips_GetType(cell) & LIPS_TYPE_SYMBOL)
-#define Lips_IsList(cell) (Lips_GetType(cell) & LIPS_TYPE_PAIR)
-#define Lips_IsEnv(cell) (Lips_GetType(cell) & LIPS_TYPE_ENV)
+#define Lips_IsInteger(cell) (Lips_GetType(cell) == LIPS_TYPE_INTEGER)
+#define Lips_IsReal(cell) (Lips_GetType(cell) == LIPS_TYPE_REAL)
+#define Lips_IsString(cell) (Lips_GetType(cell) == LIPS_TYPE_STRING)
+#define Lips_IsSymbol(cell) (Lips_GetType(cell) == LIPS_TYPE_SYMBOL)
+#define Lips_IsKeyword(cell) (Lips_GetType(cell) == LIPS_TYPE_KEYWORD)
+#define Lips_IsList(cell) (Lips_GetType(cell) == LIPS_TYPE_PAIR)
 #define Lips_IsFunction(cell) (Lips_GetType(cell) & LIPS_TYPE_FUNCTION)
 #define Lips_IsMacro(cell) (Lips_GetType(cell) & LIPS_TYPE_MACRO)
 
