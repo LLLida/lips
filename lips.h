@@ -153,6 +153,7 @@ Lips_Cell Lips_NewSymbol(Lips_Machine* machine, const char* str);
 /* Create Lisp symbol.
  */
 Lips_Cell Lips_NewSymbolN(Lips_Machine* machine, const char* str, uint32_t n);
+
 Lips_Cell Lips_NewKeyword(Lips_Machine* machine, const char* str);
 Lips_Cell Lips_NewKeywordN(Lips_Machine* machine, const char* str, uint32_t n);
 Lips_Cell Lips_NewPair(Lips_Machine* machine, Lips_Cell head, Lips_Cell tail);
@@ -203,3 +204,8 @@ void Lips_CalculateMemoryStats(Lips_Machine* machine, Lips_MemoryStats* stats);
 #endif
 
 #endif
+
+// Local Variables:
+// mode: c
+// eval: (c-set-offset 'inextern-lang 0)
+// End:
