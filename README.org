@@ -3,6 +3,8 @@
 
 * Roadmap
 
+** Keywords
+
 ** Improve tests
 
 
@@ -13,19 +15,7 @@ Exceptions are implemented. Need to improve error handling inside internal funct
 
 ** User-defined types
 
-This is a needed feature. Maybe I would make int, real user types?
-
-** Improve API
-
-Library initialization should look like this:
-#+begin_src c
-  Lips_Description desc = { .alloc = alloc_function,
-                            . dealloc = dealloc_function,
-                            .initial_size = 1024,
-                            /* ... */
-                            .some_last_option = "blabla" };
-  Lips_Interpreter* interp = Lips_CreateInterpreter(&desc);
-#+end_src
+This is a needed feature.
 
 ** Builtin functions/macros
 
@@ -36,8 +26,6 @@ Library initialization should look like this:
  5. string functions(=format=, =concat=, =capitalize= etc.). =format= will cause the most problems because I should wrap my head around strings growing.
 
 ** Docstrings
-
-Do we really need them?
 
 ** Syntactic sugar
 
