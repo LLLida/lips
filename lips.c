@@ -72,6 +72,9 @@ typedef struct FreeRegion FreeRegion;
 
 static void* DefaultAlloc(size_t bytes);
 static void DefaultDealloc(void* ptr, size_t bytes);
+static void* DefaultOpenFile(const char* file, size_t* datasize);
+static void DefaultReadFile(void* filehandle, char* buffer, size_t bytes);
+static void DefaultCloseFile(void* filehandle);
 
 static Lips_Cell NewCell(Lips_Machine* interp) LIPS_HOT_FUNCTION;
 static void DestroyCell(Lips_Machine* machine, Lips_Cell cell);
@@ -166,6 +169,7 @@ static LIPS_DECLARE_FUNCTION(throw);
 static LIPS_DECLARE_FUNCTION(call);
 static LIPS_DECLARE_FUNCTION(format);
 static LIPS_DECLARE_FUNCTION(concat);
+static LIPS_DECLARE_FUNCTION(slurp);
 
 static LIPS_DECLARE_MACRO(lambda);
 static LIPS_DECLARE_MACRO(macro);
@@ -349,6 +353,9 @@ struct Parser {
 struct Lips_Machine {
   Lips_AllocFunc alloc;
   Lips_DeallocFunc dealloc;
+  Lips_OpenFileFunc open_file;
+  Lips_ReadFileFunc read_file;
+  Lips_CloseFileFunc close_file;
   // pools for cells
   Bucket* buckets;
   uint32_t numbuckets;
@@ -389,6 +396,9 @@ Lips_CreateMachine(const Lips_MachineCreateInfo* info)
   if (machine == NULL) return NULL;
   machine->alloc = info->alloc;
   machine->dealloc = info->dealloc;
+  machine->open_file = info->open_file;
+  machine->read_file = info->read_file;
+  machine->close_file = info->close_file;
   machine->numbuckets = 0;
   machine->buckets = (Bucket*)machine->alloc(sizeof(Bucket));
   machine->allocbuckets = 1;
@@ -426,6 +436,7 @@ Lips_CreateMachine(const Lips_MachineCreateInfo* info)
   LIPS_DEFINE_FUNCTION(machine, call, LIPS_NUM_ARGS_2, NULL);
   LIPS_DEFINE_FUNCTION(machine, format, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_FUNCTION(machine, concat, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_FUNCTION(machine, slurp, LIPS_NUM_ARGS_1, NULL);
 
   LIPS_DEFINE_MACRO(machine, lambda, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(machine, macro, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
@@ -454,6 +465,9 @@ Lips_DefaultCreateMachine()
   return Lips_CreateMachine(&(Lips_MachineCreateInfo) {
       .alloc = &DefaultAlloc,
       .dealloc = &DefaultDealloc,
+      .open_file = &DefaultOpenFile,
+      .read_file = &DefaultReadFile,
+      .close_file = &DefaultCloseFile,
       .initial_stack_size = 16*1024
     });
 }
@@ -1243,6 +1257,30 @@ DefaultDealloc(void* ptr, size_t bytes)
 {
   (void)bytes;
   free(ptr);
+}
+
+void*
+DefaultOpenFile(const char* file, size_t* datasize)
+{
+  FILE* fp = fopen(file, "rb");
+  if (fp) {
+    fseek(fp, 0, SEEK_END);
+    *datasize = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+  }
+  return fp;
+}
+
+void
+DefaultReadFile(void* filehandle, char* buffer, size_t bytes)
+{
+  fread(buffer, 1, bytes, filehandle);
+}
+
+void
+DefaultCloseFile(void* filehandle)
+{
+  fclose(filehandle);
 }
 
 void
@@ -2737,6 +2775,29 @@ LIPS_DECLARE_FUNCTION(concat)
     strcat(curr, GET_STR_PTR(machine, args[i]));
     curr += STR_DATA_LENGTH(GET_STR(args[i]));
   }
+  return cell;
+}
+
+LIPS_DECLARE_FUNCTION(slurp)
+{
+  (void)numargs;
+  (void)udata;
+  TYPE_CHECK(machine, LIPS_TYPE_STRING, args[0]);
+  const char* filename = GET_STR_PTR(machine, args[0]);
+  size_t bytes;
+  void* file = machine->open_file(filename, &bytes);
+  if (file == NULL) {
+    // return nil if failed to open file
+    // FIXME: is this right? or is it better to raise an exception?
+    return machine->S_nil;
+  }
+  Lips_Cell cell = NewCell(machine);
+  cell->type = LIPS_TYPE_STRING;
+  GET_STR(cell) = StringCreate(machine, NULL, bytes);
+  STR_DATA_REF_INC(GET_STR(cell));
+  char* buffer = GET_STR_PTR(machine, cell);
+  machine->read_file(file, buffer, bytes);
+  machine->close_file(file);
   return cell;
 }
 

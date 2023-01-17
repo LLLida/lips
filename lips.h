@@ -39,6 +39,9 @@ extern "C" {
 
 typedef void*(*Lips_AllocFunc)(size_t bytes);
 typedef void(*Lips_DeallocFunc)(void* ptr, size_t bytes);
+typedef void*(*Lips_OpenFileFunc)(const char* file, size_t* datasize);
+typedef void(*Lips_ReadFileFunc)(void* filehandle, char* buffer, size_t bytes);
+typedef void(*Lips_CloseFileFunc)(void* filehandle);
 
 typedef struct Lips_Machine Lips_Machine;
 
@@ -97,6 +100,9 @@ typedef struct {
   Lips_AllocFunc alloc;
   Lips_DeallocFunc dealloc;
   uint32_t initial_stack_size;
+  Lips_OpenFileFunc open_file;
+  Lips_ReadFileFunc read_file;
+  Lips_CloseFileFunc close_file;
 } Lips_MachineCreateInfo;
 
 typedef struct {

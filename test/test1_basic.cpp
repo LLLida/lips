@@ -96,7 +96,8 @@ int main(int argc, char** argv) {
     "(tail)",
     "(tail :a :m :o :n \"g us\")",
     "(define Hello \"Hello\")",
-    "(concat Hello \" \" \"world\")"
+    "(concat Hello \" \" \"world\")",
+    "(slurp \"../compile_commands.json\")"
   };
   for (int i = 0; i < ARRAY_SIZE(test_strings); i++) {
     const char* test_string = test_strings[i];
