@@ -94,7 +94,9 @@ int main(int argc, char** argv) {
     "(format \"some-validation: %d\")",
     ":some-keyword",
     "(tail)",
-    "(tail :a :m :o :n \"g us\")"
+    "(tail :a :m :o :n \"g us\")",
+    "(define Hello \"Hello\")",
+    "(concat Hello \" \" \"world\")"
   };
   for (int i = 0; i < ARRAY_SIZE(test_strings); i++) {
     const char* test_string = test_strings[i];

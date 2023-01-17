@@ -165,6 +165,7 @@ static LIPS_DECLARE_FUNCTION(typeof);
 static LIPS_DECLARE_FUNCTION(throw);
 static LIPS_DECLARE_FUNCTION(call);
 static LIPS_DECLARE_FUNCTION(format);
+static LIPS_DECLARE_FUNCTION(concat);
 
 static LIPS_DECLARE_MACRO(lambda);
 static LIPS_DECLARE_MACRO(macro);
@@ -424,6 +425,7 @@ Lips_CreateMachine(const Lips_MachineCreateInfo* info)
   LIPS_DEFINE_FUNCTION(machine, throw, LIPS_NUM_ARGS_1, NULL);
   LIPS_DEFINE_FUNCTION(machine, call, LIPS_NUM_ARGS_2, NULL);
   LIPS_DEFINE_FUNCTION(machine, format, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_FUNCTION(machine, concat, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
 
   LIPS_DEFINE_MACRO(machine, lambda, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(machine, macro, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
@@ -1281,8 +1283,10 @@ StringCreate(Lips_Machine* machine, const char* str, uint32_t n)
   data->ptr_offset = ptr + sizeof(StringData*) - chunk->data;
   ptr += sizeof(StringData*);
   data->length = STR_DATA_MAKE_LEN(n, bytes - n - sizeof(StringData*));
-  strncpy(ptr, str, n);
-  ptr[n] = '\0';
+  if (str) {
+    strncpy(ptr, str, n);
+    ptr[n] = '\0';
+  }
   data->hash = ComputeHash(ptr);
   return data;
 }
@@ -2709,6 +2713,31 @@ LIPS_DECLARE_FUNCTION(format)
     }
   }
   return Lips_NewStringN(machine, initial_buff, sizeof(initial_buff) - (buff - initial_buff));
+}
+
+LIPS_DECLARE_FUNCTION(concat)
+{
+  (void)udata;
+  // compute size of resulting string
+  uint32_t total_size = 0;
+  for (uint32_t i = 0; i < numargs; i++) {
+    TYPE_CHECK(machine, LIPS_TYPE_STRING, args[i]);
+    total_size += STR_DATA_LENGTH(GET_STR(args[i]));
+  }
+  // create a string
+  Lips_Cell cell = NewCell(machine);
+  cell->type = LIPS_TYPE_STRING;
+  GET_STR(cell) = StringCreate(machine, NULL, total_size);
+  STR_DATA_REF_INC(GET_STR(cell));
+  char* curr = GET_STR_PTR(machine, cell);
+  // write argument contents to resulting string
+  strcpy(curr, GET_STR_PTR(machine, args[0]));
+  curr += STR_DATA_LENGTH(GET_STR(args[0]));
+  for (uint32_t i = 1; i < numargs; i++) {
+    strcat(curr, GET_STR_PTR(machine, args[i]));
+    curr += STR_DATA_LENGTH(GET_STR(args[i]));
+  }
+  return cell;
 }
 
 LIPS_DECLARE_MACRO(lambda)

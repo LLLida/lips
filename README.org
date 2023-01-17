@@ -23,7 +23,7 @@ This is a needed feature.
  2. list managing functions(=car=, =list=, =caddaar= etc.)
  3. general functions(===, =nilp=, =typeof= etc.)
  4. environment functions(=eval=, =intern= etc.)
- 5. string functions(=format=, =concat=, =capitalize= etc.). =format= will cause the most problems because I should wrap my head around strings growing.
+ 5. string functions(=format=, =concat=, =capitalize= etc.).
 
 ** Docstrings
 
