@@ -2791,10 +2791,12 @@ LIPS_DECLARE_FUNCTION(slurp)
     // FIXME: is this right? or is it better to raise an exception?
     return machine->S_nil;
   }
+  // allocate a string
   Lips_Cell cell = NewCell(machine);
   cell->type = LIPS_TYPE_STRING;
   GET_STR(cell) = StringCreate(machine, NULL, bytes);
   STR_DATA_REF_INC(GET_STR(cell));
+  // read file contents to the string
   char* buffer = GET_STR_PTR(machine, cell);
   machine->read_file(file, buffer, bytes);
   machine->close_file(file);
@@ -2840,8 +2842,8 @@ LIPS_DECLARE_MACRO(macro)
 LIPS_DECLARE_MACRO(define)
 {
   (void)udata;
+  // FIXME: avoid recursion
   Lips_Cell value = Lips_Eval(machine, GET_HEAD(GET_TAIL(args)));
-  // TODO: handle error
   return Lips_DefineCell(machine, GET_HEAD(args), value);
 }
 
@@ -2849,6 +2851,7 @@ LIPS_DECLARE_MACRO(quote)
 {
   (void)udata;
   (void)machine;
+  // just return argument
   return GET_HEAD(args);
 }
 
