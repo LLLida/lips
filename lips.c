@@ -300,11 +300,15 @@ struct EvalState {
 #define ES_CODE(es) (es)->data.exec.code
 #define ES_CATCH_PARENT(es) (es)->data.exec.parent
 
+#define NUM_STRING_POOL_SIZES 5
+static const uint32_t string_pool_sizes[NUM_STRING_POOL_SIZES] = { 4, 8, 16, 32, 64 };
+
 struct StringPool {
 #define STRING_POOL_NUM_CHUNKS 10
   // i-th chunk has 4^i * chunk[0] bytes allocated
   Bucket chunks[STRING_POOL_NUM_CHUNKS];
   uint32_t str_max_size;
+  uint32_t initial_chunk_size;
 };
 
 struct Parser {
@@ -335,10 +339,8 @@ struct Lips_Machine {
   uint32_t allocstr_buckets;
   // pools for string data
   // 4, 8, 16, 32, 64
-  StringPool string_pools[5];
-
-  // MemChunk chunks[MAX_CHUNKS];
-  // uint32_t numchunks;
+  StringPool string_pools[NUM_STRING_POOL_SIZES];
+  // our beloved stack
   Stack stack;
   uint32_t envpos;
   uint32_t evalpos;
@@ -372,20 +374,16 @@ Lips_CreateMachine(const Lips_MachineCreateInfo* info)
   machine->open_file = info->open_file;
   machine->read_file = info->read_file;
   machine->close_file = info->close_file;
+
   machine->numbuckets = 0;
   machine->buckets = (Bucket*)machine->alloc(sizeof(Bucket));
   machine->allocbuckets = 1;
-  // machine->numchunks = 0;
-  machine->string_pools[0].str_max_size = 4;
-  memset(machine->string_pools[0].chunks, 0, sizeof(Bucket) * STRING_POOL_NUM_CHUNKS);
-  machine->string_pools[1].str_max_size = 8;
-  memset(machine->string_pools[1].chunks, 0, sizeof(Bucket) * STRING_POOL_NUM_CHUNKS);
-  machine->string_pools[2].str_max_size = 16;
-  memset(machine->string_pools[2].chunks, 0, sizeof(Bucket) * STRING_POOL_NUM_CHUNKS);
-  machine->string_pools[3].str_max_size = 32;
-  memset(machine->string_pools[3].chunks, 0, sizeof(Bucket) * STRING_POOL_NUM_CHUNKS);
-  machine->string_pools[4].str_max_size = 64;
-  memset(machine->string_pools[4].chunks, 0, sizeof(Bucket) * STRING_POOL_NUM_CHUNKS);
+
+  for (int i = 0; i < NUM_STRING_POOL_SIZES; i++) {
+    machine->string_pools[i].str_max_size = string_pool_sizes[i];
+    machine->string_pools[i].initial_chunk_size = 16 * 1024;
+    memset(machine->string_pools[i].chunks, 0, sizeof(Bucket) * STRING_POOL_NUM_CHUNKS);
+  }
 
   machine->str_buckets = (Bucket*)machine->alloc(sizeof(Bucket));
   machine->allocstr_buckets = 1;
@@ -405,7 +403,7 @@ Lips_CreateMachine(const Lips_MachineCreateInfo* info)
   // t is just an integer
   // FIXME: do I need to add a new type for "t"?
   machine->S_t = Lips_Define(machine, "t", Lips_NewInteger(machine, 1));
-  machine->S_filename = Lips_NewPair(machine, NULL, NULL);
+  machine->S_filename = Lips_Define(machine, "<filename>", Lips_NewPair(machine, NULL, NULL));
 
   LIPS_DEFINE_FUNCTION(machine, list, LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_FUNCTION(machine, car, LIPS_NUM_ARGS_1, NULL);
@@ -478,12 +476,11 @@ Lips_DestroyMachine(Lips_Machine* machine)
   }
   for (uint32_t i = 0; i < machine->numstr_buckets; i++)
     DestroyBucket(machine, &machine->str_buckets[i], sizeof(StringData));
-  const int sizes[] = { 4, 8, 16, 32, 64};
-  for (uint32_t i = 0; i < sizeof(sizes) / sizeof(int); i++) {
+  for (uint32_t i = 0; i < NUM_STRING_POOL_SIZES; i++) {
     for (uint32_t j = 0; j < STRING_POOL_NUM_CHUNKS; j++) {
       Bucket* chunk = &machine->string_pools[i].chunks[j];
       if (chunk->data)
-        DestroyBucket(machine, chunk, sizes[i]);
+        DestroyBucket(machine, chunk, string_pool_sizes[i]);
     }
   }
   dealloc(machine->buckets, sizeof(Bucket) * machine->allocbuckets);
@@ -1181,15 +1178,20 @@ Lips_CalculateMemoryStats(Lips_Machine* machine, Lips_MemoryStats* stats)
       uint32_t mask = *(uint32_t*)&data[i];
       if (mask ^ DEAD_MASK) {
         stats->str_used_bytes += sizeof(StringData);
+        // +1 for null-terminator
+        stats->str_used_bytes += data[i].length + 1;
         n--;
       }
     }
   }
-  // for (uint32_t i = 0; i < machine->numchunks; i++) {
-  //   MemChunk* chunk = &machine->chunks[i];
-  //   stats->str_allocated_bytes += chunk->numbytes;
-  //   stats->str_used_bytes += chunk->used;
-  // }
+  for (uint32_t i = 0; i < NUM_STRING_POOL_SIZES; i++) {
+    for (uint32_t j = 0; j < STRING_POOL_NUM_CHUNKS; j++) {
+      Bucket* chunk = &machine->string_pools[i].chunks[j];
+      if (chunk->data == NULL)
+        break;
+      stats->str_allocated_bytes += chunk->num_elements * string_pool_sizes[i];;
+    }
+  }
   stats->allocated_bytes += stats->cell_allocated_bytes + stats->str_allocated_bytes;
 }
 
@@ -2065,16 +2067,9 @@ FindBucketForString(Lips_Machine* machine)
 StringPool*
 GetStringPool(Lips_Machine* machine, uint32_t str_size_with_0)
 {
-  if (str_size_with_0 <= 4) {
-    return &machine->string_pools[0];
-  } else if (str_size_with_0 <= 8) {
-    return &machine->string_pools[1];
-  } else if (str_size_with_0 <= 16) {
-    return &machine->string_pools[2];
-  } else if (str_size_with_0 <= 32) {
-    return &machine->string_pools[3];
-  } else if (str_size_with_0 <= 64) {
-    return &machine->string_pools[4];
+  for (uint32_t i = 0; i < NUM_STRING_POOL_SIZES; i++) {
+    if (str_size_with_0 <= string_pool_sizes[i])
+      return &machine->string_pools[i];
   }
   return NULL;
 }
@@ -2086,14 +2081,14 @@ FindSpaceForString(StringPool* pool, Lips_AllocFunc alloc)
   for (uint32_t i = 0; i < STRING_POOL_NUM_CHUNKS; i++) {
     if (pool->chunks[i].data == NULL) {
       // TODO: don't hardcode
-      uint32_t size = 16 * 1024;
+      uint32_t size = pool->initial_chunk_size;
       if (i > 0) {
         size = 4 * pool->chunks[i-1].size;
       }
       chunk = &pool->chunks[i];
       CreateBucket(alloc, chunk, size / pool->str_max_size, pool->str_max_size);
       break;
-    } else if (pool->chunks[i].size > 0) {
+    } else if (pool->chunks[i].size < pool->chunks[i].num_elements) {
       chunk = &pool->chunks[i];
       break;
     }
