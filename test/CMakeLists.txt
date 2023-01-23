@@ -1,7 +1,10 @@
 project(test)
 
-add_executable(test1_basic test1_basic.cpp)
+function (make_test name)
+  add_executable(${name} ${name}.cpp)
+  target_link_libraries(${name} PRIVATE lips)
+  add_test(NAME ${name} COMMAND ${name})
+endfunction ()
 
-target_link_libraries(test1_basic PRIVATE lips)
-
-add_test(NAME test1_basic COMMAND test1_basic)
+make_test(test1_basic)
+make_test(test2_gc)

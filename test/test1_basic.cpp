@@ -108,9 +108,9 @@ int main(int argc, char** argv) {
       Lips_PrintCell(machine, evaluated_string, buff, sizeof(buff));
       printf("Test %d: %s -> %s\n", i, test_string, buff);
     }
-    // if (i % 10 == 9) {
-    //   Lips_GarbageCollect(machine);
-    // }
+    if (i % 10 == 9) {
+      Lips_GarbageCollect(machine);
+    }
   }
 
   Lips_MemoryStats memoryStats;

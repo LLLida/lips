@@ -429,13 +429,13 @@ Lips_CreateMachine(const Lips_MachineCreateInfo* info)
   LIPS_DEFINE_MACRO(machine, catch, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(machine, intern, LIPS_NUM_ARGS_1, NULL);
 
-  machine->T_integer  = Lips_NewSymbol(machine, "integer");
-  machine->T_real     = Lips_NewSymbol(machine, "real");
-  machine->T_string   = Lips_NewSymbol(machine, "string");
-  machine->T_symbol   = Lips_NewSymbol(machine, "symbol");
-  machine->T_pair     = Lips_NewSymbol(machine, "pair");
-  machine->T_function = Lips_NewSymbol(machine, "function");
-  machine->T_macro    = Lips_NewSymbol(machine, "macro");
+  machine->T_integer  = Lips_Define(machine, "<integer>", Lips_NewSymbol(machine, "integer"));
+  machine->T_real     = Lips_Define(machine, "<real>", Lips_NewSymbol(machine, "real"));
+  machine->T_string   = Lips_Define(machine, "<string>", Lips_NewSymbol(machine, "string"));
+  machine->T_symbol   = Lips_Define(machine, "<symbol>", Lips_NewSymbol(machine, "symbol"));
+  machine->T_pair     = Lips_Define(machine, "<pair>", Lips_NewSymbol(machine, "pair"));
+  machine->T_function = Lips_Define(machine, "<function>", Lips_NewSymbol(machine, "function"));
+  machine->T_macro    = Lips_Define(machine, "<macro>", Lips_NewSymbol(machine, "macro"));
 
   return machine;
 }
