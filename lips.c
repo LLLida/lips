@@ -152,6 +152,7 @@ static LIPS_DECLARE_FUNCTION(call);
 static LIPS_DECLARE_FUNCTION(format);
 static LIPS_DECLARE_FUNCTION(concat);
 static LIPS_DECLARE_FUNCTION(slurp);
+static LIPS_DECLARE_FUNCTION(load);
 
 static LIPS_DECLARE_MACRO(lambda);
 static LIPS_DECLARE_MACRO(macro);
@@ -418,6 +419,7 @@ Lips_CreateMachine(const Lips_MachineCreateInfo* info)
   LIPS_DEFINE_FUNCTION(machine, format, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_FUNCTION(machine, concat, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_FUNCTION(machine, slurp, LIPS_NUM_ARGS_1, NULL);
+  LIPS_DEFINE_FUNCTION(machine, load, LIPS_NUM_ARGS_1, NULL);
 
   LIPS_DEFINE_MACRO(machine, lambda, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(machine, macro, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
@@ -568,9 +570,10 @@ Lips_Eval(Lips_Machine* machine, Lips_Cell cell)
         if (Lips_IsFunction(c)) {
           // every function must be executed inside it's own environment
           PushEnv(machine);
-          ret = GET_CFUNC(c).ptr(machine, ES_ARG_COUNT(state), state->args.array, GET_CFUNC(c).udata);
+          uint32_t count = ES_ARG_COUNT(state);
+          ret = GET_CFUNC(c).ptr(machine, count, state->args.array, GET_CFUNC(c).udata);
           // array of arguments no more needed; we can free it
-          FreeArgumentArray(machine, ES_ARG_COUNT(state), state->args.array);
+          FreeArgumentArray(machine, count, state->args.array);
           PopEnv(machine);
         } else {
           ret = GET_CMACRO(c).ptr(machine, state->args.list, GET_CMACRO(c).udata);
@@ -2576,9 +2579,7 @@ LIPS_DECLARE_FUNCTION(slurp)
   size_t bytes;
   void* file = machine->open_file(filename, &bytes);
   if (file == NULL) {
-    // return nil if failed to open file
-    // FIXME: is this right? or is it better to raise an exception?
-    return machine->S_nil;
+    LIPS_THROW_ERROR(machine, "failed to open file '%s'", filename);
   }
   // allocate a string
   Lips_Cell cell = NewCell(machine);
@@ -2592,6 +2593,33 @@ LIPS_DECLARE_FUNCTION(slurp)
   GET_STR(cell)->hash = ComputeHash(GET_STR_PTR(cell));
   machine->close_file(file);
   return cell;
+}
+
+LIPS_DECLARE_FUNCTION(load)
+{
+  (void)numargs;
+  (void)udata;
+  TYPE_CHECK(machine, LIPS_TYPE_STRING, args[0]);
+  const char* filename = GET_STR_PTR(args[0]);
+  size_t bytes;
+  void* file = machine->open_file(filename, &bytes);
+  if (file == NULL) {
+    LIPS_THROW_ERROR(machine, "failed to open file '%s'", filename);
+  }
+  char* buff = machine->alloc(bytes + 10);
+  int offset = sprintf(buff, "( ");
+  machine->read_file(file, buff+offset, bytes);
+  machine->close_file(file);
+  buff[bytes + offset] = ')';
+  buff[bytes + offset+1] = '\0';
+  Parser parser;
+  ParserInit(&parser, buff, bytes + offset + 1);
+  Lips_Cell ast = GenerateAST(machine, &parser);
+  machine->dealloc(buff, bytes);
+  Lips_Cell temp = Lips_ListPushBack(machine, machine->S_filename, args[0]);
+  Lips_Cell ret = M_progn(machine, ast, NULL);
+  GET_TAIL(temp) = NULL; // this equals to Lips_ListPop(machine, machine->S_filename);
+  return ret;
 }
 
 LIPS_DECLARE_MACRO(lambda)
