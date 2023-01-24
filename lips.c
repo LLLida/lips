@@ -39,7 +39,7 @@ typedef struct StringPool StringPool;
 #define MAX_CHUNKS 16
 #define LIPS_EOF (-1)
 #define STACK_INVALID_POS ((uint32_t)-1)
-#define DEAD_MASK (1<<31)
+#define DEAD_MASK (1u<<31)
 #define MARK_MASK (1<<30)
 #define IS_DEAD(cell) ((cell).type & DEAD_MASK)
 #define IS_WHITESPACE(c) ((c) == ' ' || (c) == '\n' || (c) == '\t' || (c) == '\r')
@@ -185,7 +185,7 @@ struct HashTable {
   uint32_t parent;
 };
 #define HASH_TABLE_DATA(ht) (Node*)((HashTable*)ht+1)
-#define HASH_TABLE_CONSTANT_FLAG (1<<31)
+#define HASH_TABLE_CONSTANT_FLAG (1u<<31)
 #define HASH_TABLE_GET_SIZE(ht) ((ht)->flags & ~HASH_TABLE_CONSTANT_FLAG)
 #define HASH_TABLE_SET_SIZE(ht, sz) (ht)->flags = ((ht)->flags & HASH_TABLE_CONSTANT_FLAG) | (sz)
 
