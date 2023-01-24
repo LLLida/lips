@@ -12,6 +12,7 @@ set_target_properties(lips PROPERTIES
   C_EXTENSIONS OFF)
 
 set(ENABLE_ASAN 1)
+set(ENABLE_STATIC_ANALYZER 0)
 
 if (ENABLE_ASAN)
   # enable all warnings from compiler
@@ -29,6 +30,11 @@ else ()
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic> # g++ or clang
   )
 endif()
+
+if (ENABLE_STATIC_ANALYZER)
+  target_compile_options(lips PRIVATE
+    -fanalyzer)
+endif ()
 
 add_subdirectory(util)
 
