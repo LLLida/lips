@@ -101,7 +101,7 @@ static EvalState* PopEvalState(Lips_Machine* machine);
 
 static void PushCatch(Lips_Machine* machine);
 static void PopCatch(Lips_Machine* machine);
-static EvalState* UnwindStack(Lips_Machine* machine);
+static void UnwindStack(Lips_Machine* machine);
 
 static HashTable* MachineEnv(Lips_Machine* machine);
 static HashTable* PushEnv(Lips_Machine* machine);
@@ -589,7 +589,7 @@ Lips_Eval(Lips_Machine* machine, Lips_Cell cell)
             PopEvalState(machine);
             return NULL;
           }
-          state = UnwindStack(machine);
+          UnwindStack(machine);
           ret = machine->throwvalue;
         }
       } else {
@@ -1803,15 +1803,13 @@ PopCatch(Lips_Machine* machine)
   machine->catchpos = ES_CATCH_PARENT(catch);
 }
 
-EvalState*
+void
 UnwindStack(Lips_Machine* machine)
 {
-  EvalState* state = (EvalState*)(machine->stack.data + machine->evalpos);
   while (machine->catchpos != machine->evalpos) {
-    state = PopEvalState(machine);
+    PopEvalState(machine);
   }
   PopCatch(machine);
-  return state;
 }
 
 HashTable*
