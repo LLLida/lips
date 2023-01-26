@@ -1,9 +1,24 @@
 #+TITLE: Lips programming language
 #+AUTHOR: Adil Mokhammad
 
+* Rationale
+
+There aren't many embeddable lisps out there. One could argue that there are some projects like =guile=, =s7 lisp=, =racket= etc. But I want something very simple yet fast like =lua=. *Lips* tries to be both very *simple* and *featureful* language.
+
+** Why use *lips*:
+- small and easy to integrate codebase. The interpreter is implemented in two files: =lips.h= and =lips.c=. There are nearly 3000 lines of code in this files. I guarantee that in future interpreter won't exceed 5000 Loc. However there're will be some additional modules.
+- performance.
+- simplified syntax. Lisp syntax is best syntax for programming ever. Period.
+
+** Why not use *lips*
+- There're probably some bugs.
+- API is unstable.
+- No libraries/packages. One should write them by themselves using FFI. I plan to write some standard modules though.
+- No support for common text editors. I plan for writing some mode for Emacs. For now if you use Emacs you can put ";; -*- mode: scheme -*-" at beginning of a file.
+
 * Roadmap
 
-** Keywords
+** Builtin property lists aka plists
 
 ** Improve tests
 
@@ -33,3 +48,5 @@ This is a needed feature.
   (quote something) -> 'something
   (lambda (a) $car (list a 7 6 5)) -> (lambda (a) (car (list a 7 6 5)))
 #+end_src
+
+** Narrow down amount of allocations
