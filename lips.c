@@ -773,6 +773,10 @@ Lips_NewPair(Lips_Machine* machine, Lips_Cell head, Lips_Cell tail)
 Lips_Cell
 Lips_NewList(Lips_Machine* machine, uint32_t numCells, Lips_Cell* cells)
 {
+  // important optimization: don't allocate unnecessary lists when we can just return nil
+  if (numCells == 0) {
+    return machine->S_nil;
+  }
   Lips_Cell list = Lips_NewPair(machine, NULL, NULL);
   Lips_Cell curr = list;
   while (numCells--) {
@@ -2265,6 +2269,7 @@ Mark(Lips_Machine* machine)
         if (value->type & MARK_MASK) {
           depth--;
         } else {
+          value->type |= MARK_MASK;
           prev = StackRequire(machine->alloc, machine->dealloc,
                               &machine->stack, sizeof(Lips_Cell));
           *prev = GET_LFUNC(value).args;

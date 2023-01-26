@@ -4,12 +4,16 @@
 Lips_Machine* machine;
 
 void TEST(const char* str);
+#define GC() printf("-----Garbage collection-----\n");  \
+  Lips_GarbageCollect(machine)
 
 int main(int argc, char** argv) {
   machine = Lips_DefaultCreateMachine();
 
   TEST("(define kitty \"hello\")");
-  Lips_GarbageCollect(machine);
+
+  GC();
+  TEST("tail");
   TEST("kitty");
 
   TEST("(list kitty 35 333)");
@@ -25,6 +29,15 @@ int main(int argc, char** argv) {
 
   TEST("(progn (define such (quote a)) (define waste \"!\"))");
   TEST("(list (typeof such) (typeof kitty) (typeof waste))");
+
+  TEST("(define tail (lambda (a ...) (progn ...)))");
+  TEST("(tail 1 2 3 4 5)");
+
+  GC();
+  GC();
+
+  TEST("tail");
+  TEST("(tail 1 2 3 4 5)");
 
   Lips_DestroyMachine(machine);
   return 0;
