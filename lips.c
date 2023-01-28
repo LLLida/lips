@@ -116,13 +116,12 @@ static HashTable* HashTableCreate(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc
 static void HashTableDestroy(Stack* stack, HashTable* ht);
 static void HashTableReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity);
 static Lips_Cell* HashTableInsert(Lips_Machine* machine,
-                                  HashTable* ht, StringData* key, Lips_Cell value);
-static Lips_Cell* HashTableSearch(const HashTable* ht, const char* key);
-static Lips_Cell* HashTableSearchWithHash(const HashTable* ht, uint32_t hash, const char* key);
-static StringData* HashTableSearchKey(const HashTable* ht, uint32_t hash, const char* key, uint32_t n);
+                                  HashTable* ht, Lips_Cell key, Lips_Cell value);
+static Lips_Cell* HashTableSearch(const HashTable* ht, Lips_Cell key);
+static Lips_Cell HashTableSearchStr(const HashTable* ht, uint32_t hash, const char* key, uint32_t n);
 static void HashTableIterate(HashTable* ht, Iterator* it);
 static int IteratorIsEmpty(const Iterator* it);
-static void IteratorGet(const Iterator* it, StringData** key, Lips_Cell* value);
+static void IteratorGet(const Iterator* it, Lips_Cell* key, Lips_Cell* value);
 static void IteratorNext(Iterator* it);
 
 static Bucket* FindBucketForString(Lips_Machine* machine);
@@ -250,7 +249,7 @@ struct Lips_Value {
 #define GET_TAIL_TYPE(cell) GET_TYPE(GET_TAIL(cell))
 
 struct Node {
-  StringData* key;
+  Lips_Cell key;
   Lips_Cell value;
 };
 #define NODE_VALID(node) ((node).value != NULL)
@@ -727,21 +726,18 @@ Lips_NewSymbol(Lips_Machine* machine, const char* str)
 Lips_Cell
 Lips_NewSymbolN(Lips_Machine* machine, const char* str, uint32_t n)
 {
-  Lips_Cell cell = NewCell(machine);
-  cell->type = LIPS_TYPE_SYMBOL;
-  StringData* data = NULL;
   // try to find string in environments so we don't waste space
   HashTable* env = MachineEnv(machine);
   uint32_t hash = ComputeHashN(str, n);
   do {
-    data = HashTableSearchKey(env, hash, str, n);
-    if (data)
-      goto skip;
+    Lips_Cell cell = HashTableSearchStr(env, hash, str, n);
+    if (cell)
+      return cell;
     env = EnvParent(machine, env);
   } while (env);
-  data = StringCreateWithHash(machine, str, n, hash);
- skip:
-  GET_STR(cell) = data;
+  Lips_Cell cell = NewCell(machine);
+  cell->type = LIPS_TYPE_SYMBOL;
+  GET_STR(cell) = StringCreateWithHash(machine, str, n, hash);
   GET_STR(cell)->refs++;
   return cell;
 }
@@ -755,8 +751,24 @@ Lips_NewKeyword(Lips_Machine* machine, const char* str)
 Lips_Cell
 Lips_NewKeywordN(Lips_Machine* machine, const char* str, uint32_t n)
 {
-  Lips_Cell cell = Lips_NewSymbolN(machine, str, n);
+  Lips_Cell cell = NewCell(machine);
   cell->type = LIPS_TYPE_KEYWORD;
+  StringData* data = NULL;
+  // try to find string in environments so we don't waste space
+  HashTable* env = MachineEnv(machine);
+  uint32_t hash = ComputeHashN(str, n);
+  do {
+    Lips_Cell sym = HashTableSearchStr(env, hash, str, n);
+    if (sym) {
+      data = GET_STR(sym);
+      goto skip;
+    }
+    env = EnvParent(machine, env);
+  } while (env);
+  data = StringCreateWithHash(machine, str, n, hash);
+ skip:
+  GET_STR(cell) = data;
+  GET_STR(cell)->refs++;
   return cell;
 }
 
@@ -1076,9 +1088,8 @@ Lips_Define(Lips_Machine* machine, const char* name, Lips_Cell cell)
   while (env->flags & HASH_TABLE_CONSTANT_FLAG) {
     env = EnvParent(machine, env);
   }
-  StringData* key = StringCreate(machine, name, strlen(name));
+  Lips_Cell key = Lips_NewSymbol(machine, name);
   Lips_Cell* ptr = HashTableInsert(machine, env, key, cell);
-  key->refs++;
   if (ptr == NULL) {
     LIPS_THROW_ERROR(machine, "Value '%s' is already defined", name);
   }
@@ -1094,7 +1105,7 @@ Lips_DefineCell(Lips_Machine* machine, Lips_Cell cell, Lips_Cell value)
   while (env->flags & HASH_TABLE_CONSTANT_FLAG) {
     env = EnvParent(machine, env);
   }
-  Lips_Cell* ptr = HashTableInsert(machine, env, GET_STR(cell), value);
+  Lips_Cell* ptr = HashTableInsert(machine, env, cell, value);
   GET_STR(cell)->refs++;
   if (ptr == NULL) {
     LIPS_THROW_ERROR(machine, "Value '%s' is already defined");
@@ -1106,10 +1117,12 @@ Lips_Cell
 Lips_Intern(Lips_Machine* machine, const char* name)
 {
   HashTable* env = MachineEnv(machine);
+  size_t len = strlen(name);
+  uint32_t hash = ComputeHashN(name, len);
   do {
-    Lips_Cell* ptr = HashTableSearch(env, name);
+    Lips_Cell ptr = HashTableSearchStr(env, hash, name, len);
     if (ptr) {
-      return *ptr;
+      return ptr;
     }
     env = EnvParent(machine, env);
   } while (env);
@@ -1122,7 +1135,7 @@ Lips_InternCell(Lips_Machine* machine, Lips_Cell cell)
   TYPE_CHECK(machine, LIPS_TYPE_SYMBOL|LIPS_TYPE_STRING, cell);
   HashTable* env = MachineEnv(machine);
   do {
-    Lips_Cell* ptr = HashTableSearchWithHash(env, GET_STR(cell)->hash, GET_STR_PTR(cell));
+    Lips_Cell* ptr = HashTableSearch(env, cell);
     if (ptr) {
       return *ptr;
     }
@@ -1836,13 +1849,13 @@ void
 PopEnv(Lips_Machine* machine)
 {
   HashTable* env = MachineEnv(machine);
-  Iterator it;
-  for (HashTableIterate(env, &it); !IteratorIsEmpty(&it); IteratorNext(&it)) {
-    StringData* key;
-    Lips_Cell cell;
-    IteratorGet(&it, &key, &cell);
-    StringDestroy(machine, key);
-  }
+  // Iterator it;
+  // for (HashTableIterate(env, &it); !IteratorIsEmpty(&it); IteratorNext(&it)) {
+  //   Lips_Cell key;
+  //   Lips_Cell cell;
+  //   IteratorGet(&it, &key, &cell);
+  //   StringDestroy(machine, GET_STR(key));
+  // }
   HashTableDestroy(&machine->stack, env);
   machine->envpos = env->parent;
 }
@@ -1929,17 +1942,17 @@ HashTableReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity)
 
 Lips_Cell*
 HashTableInsert(Lips_Machine* machine,
-                HashTable* ht, StringData* key, Lips_Cell value) {
+                HashTable* ht, Lips_Cell key, Lips_Cell value) {
   assert(value && "Can not insert null");
   if (HASH_TABLE_GET_SIZE(ht) == ht->allocated) {
     uint32_t sz = (HASH_TABLE_GET_SIZE(ht) == 0) ? 1 : (HASH_TABLE_GET_SIZE(ht)<<1);
     HashTableReserve(machine, ht, sz);
   }
   Node* data = HASH_TABLE_DATA(ht);
-  uint32_t id = key->hash % ht->allocated;
+  uint32_t id = GET_STR(key)->hash % ht->allocated;
   while (NODE_VALID(data[id])) {
     // Hash table already has this element
-    if (StringEqual(data[id].key, key)) {
+    if (StringEqual(GET_STR(data[id].key), GET_STR(key))) {
       return NULL;
     }
     id = (id+1) % ht->allocated;
@@ -1952,22 +1965,16 @@ HashTableInsert(Lips_Machine* machine,
 }
 
 Lips_Cell*
-HashTableSearch(const HashTable* ht, const char* key)
-{
-  uint32_t hash = ComputeHash(key);
-  return HashTableSearchWithHash(ht, hash, key);
-}
-
-Lips_Cell*
-HashTableSearchWithHash(const HashTable* ht, uint32_t hash, const char* key)
+HashTableSearch(const HashTable* ht, Lips_Cell key)
 {
   Node* data = HASH_TABLE_DATA(ht);
+  StringData* str = GET_STR(key);
   uint32_t i = 0;
-  uint32_t id = hash;
+  uint32_t id = str->hash;
   while (i < HASH_TABLE_GET_SIZE(ht)) {
     id = id % ht->allocated;
     if (NODE_VALID(data[id])) {
-      if (data[id].key->hash == hash && strcmp(data[id].key->data, key) == 0)
+      if (GET_STR(data[id].key)->hash == str->hash && strcmp(GET_STR(data[id].key)->data, str->data) == 0)
         return &data[id].value;
       i++;
       // linear probing
@@ -1979,8 +1986,8 @@ HashTableSearchWithHash(const HashTable* ht, uint32_t hash, const char* key)
   return NULL;
 }
 
-StringData*
-HashTableSearchKey(const HashTable* ht, uint32_t hash, const char* key, uint32_t n)
+Lips_Cell
+HashTableSearchStr(const HashTable* ht, uint32_t hash, const char* key, uint32_t n)
 {
   Node* data = HASH_TABLE_DATA(ht);
   uint32_t i = 0;
@@ -1988,10 +1995,10 @@ HashTableSearchKey(const HashTable* ht, uint32_t hash, const char* key, uint32_t
   while (i < HASH_TABLE_GET_SIZE(ht)) {
     id = id % ht->allocated;
     if (NODE_VALID(data[id])) {
-      StringData* val = data[id].key;
-      if (hash == val->hash &&
-          val->length == n &&
-          strncmp(val->data, key, n) == 0)
+      Lips_Cell val = data[id].key;
+      if (hash == GET_STR(val)->hash &&
+          GET_STR(val)->length == n &&
+          strncmp(GET_STR(val)->data, key, n) == 0)
         return data[id].key;
       i++;
       // linear probing
@@ -2021,7 +2028,7 @@ IteratorIsEmpty(const Iterator* it)
 }
 
 void
-IteratorGet(const Iterator* it, StringData** key, Lips_Cell* value)
+IteratorGet(const Iterator* it, Lips_Cell* key, Lips_Cell* value)
 {
   *key = it->node->key;
   *value  = it->node->value;
@@ -2123,7 +2130,7 @@ DefineWithCurrent(Lips_Machine* machine, Lips_Cell name, Lips_Cell value)
   assert(value);
   HashTable* env = MachineEnv(machine);
   Lips_Cell* ptr = HashTableInsert(machine, env,
-                                   GET_STR(name), value);
+                                   name, value);
   GET_STR(name)->refs++;
   assert(ptr && "Internal error(value is already defined)");
 }
@@ -2242,13 +2249,14 @@ Mark(Lips_Machine* machine)
 #endif
   HashTable* env = MachineEnv(machine);
   Iterator it;
-  StringData* key;
+  Lips_Cell key;
   Lips_Cell value;
   uint32_t depth;
   Lips_Cell* prev;
   do {
     for (HashTableIterate(env, &it); !IteratorIsEmpty(&it); IteratorNext(&it)) {
       IteratorGet(&it, &key, &value);
+      key->type |= MARK_MASK;
       depth = 1;
     cycle:
       switch (GET_TYPE(value)) {
