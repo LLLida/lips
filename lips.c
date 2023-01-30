@@ -107,6 +107,7 @@ static HashTable* MachineEnv(Lips_Machine* machine);
 static HashTable* PushEnv(Lips_Machine* machine);
 static void PopEnv(Lips_Machine* machine);
 static HashTable* EnvParent(Lips_Machine* machine, HashTable* env);
+static uint32_t NearestPowerOfTwo(uint32_t v);
 // compute hash of null terminated string
 static uint32_t ComputeHash(const char* string) LIPS_PURE_FUNCTION;
 // compute hash of sized string(no null terminator at end)
@@ -117,8 +118,8 @@ static void HashTableDestroy(Stack* stack, HashTable* ht);
 static void HashTableReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity);
 static Lips_Cell* HashTableInsert(Lips_Machine* machine,
                                   HashTable* ht, Lips_Cell key, Lips_Cell value);
-static Lips_Cell* HashTableSearch(const HashTable* ht, Lips_Cell key);
-static Lips_Cell HashTableSearchStr(const HashTable* ht, uint32_t hash, const char* key, uint32_t n);
+static Lips_Cell HashTableSearch(const HashTable* ht, Lips_Cell key);
+static Node* HashTableSearchStr(const HashTable* ht, uint32_t hash, const char* key, uint32_t n);
 static void HashTableIterate(HashTable* ht, Iterator* it);
 static int IteratorIsEmpty(const Iterator* it);
 static void IteratorGet(const Iterator* it, Lips_Cell* key, Lips_Cell* value);
@@ -169,10 +170,9 @@ static LIPS_DECLARE_MACRO(intern);
 // Copy-On-Write string
 struct StringData {
   char* data;
-  // Do we really need to use bitfields? I think they slow memory access, not sure
+  // Do we really need to use bitfields? I think they have slow memory access, not sure
   uint32_t length : 22;
   uint32_t bucket_index : 10;
-  uint32_t refs;
   uint32_t hash;
 };
 
@@ -251,6 +251,8 @@ struct Lips_Value {
 struct Node {
   Lips_Cell key;
   Lips_Cell value;
+  // counter for robin-hood hashing
+  size_t psl;
 };
 #define NODE_VALID(node) ((node).value != NULL)
 
@@ -389,11 +391,14 @@ Lips_CreateMachine(const Lips_MachineCreateInfo* info)
   machine->allocstr_buckets = 1;
   machine->numstr_buckets = 0;
   CreateStack(machine->alloc, &machine->stack, info->initial_stack_size);
+  // create root environment
   HashTable* env = HashTableCreate(machine->alloc, machine->dealloc, &machine->stack);
   env->parent = STACK_INVALID_POS;
   machine->envpos = ((uint8_t*)env - machine->stack.data);
   machine->evalpos = STACK_INVALID_POS;
   machine->catchpos = STACK_INVALID_POS;
+  // preallocate space for hash table to speed things up
+  HashTableReserve(machine, env, 64);
   // define builtins
   machine->default_file = Lips_NewString(machine, "<eval>");
   machine->S_nil = Lips_Define(machine, "nil", Lips_NewPair(machine, NULL, NULL));
@@ -713,7 +718,6 @@ Lips_NewStringN(Lips_Machine* machine, const char* str, uint32_t n)
   Lips_Cell cell = NewCell(machine);
   cell->type = LIPS_TYPE_STRING;
   GET_STR(cell) = StringCreate(machine, str, n);
-  GET_STR(cell)->refs++;
   return cell;
 }
 
@@ -730,15 +734,14 @@ Lips_NewSymbolN(Lips_Machine* machine, const char* str, uint32_t n)
   HashTable* env = MachineEnv(machine);
   uint32_t hash = ComputeHashN(str, n);
   do {
-    Lips_Cell cell = HashTableSearchStr(env, hash, str, n);
-    if (cell)
-      return cell;
+    Node* node = HashTableSearchStr(env, hash, str, n);
+    if (node)
+      return node->key;
     env = EnvParent(machine, env);
   } while (env);
   Lips_Cell cell = NewCell(machine);
   cell->type = LIPS_TYPE_SYMBOL;
   GET_STR(cell) = StringCreateWithHash(machine, str, n, hash);
-  GET_STR(cell)->refs++;
   return cell;
 }
 
@@ -758,9 +761,9 @@ Lips_NewKeywordN(Lips_Machine* machine, const char* str, uint32_t n)
   HashTable* env = MachineEnv(machine);
   uint32_t hash = ComputeHashN(str, n);
   do {
-    Lips_Cell sym = HashTableSearchStr(env, hash, str, n);
-    if (sym) {
-      data = GET_STR(sym);
+    Node* node = HashTableSearchStr(env, hash, str, n);
+    if (node) {
+      data = GET_STR(node->key);
       goto skip;
     }
     env = EnvParent(machine, env);
@@ -768,7 +771,6 @@ Lips_NewKeywordN(Lips_Machine* machine, const char* str, uint32_t n)
   data = StringCreateWithHash(machine, str, n, hash);
  skip:
   GET_STR(cell) = data;
-  GET_STR(cell)->refs++;
   return cell;
 }
 
@@ -1106,7 +1108,6 @@ Lips_DefineCell(Lips_Machine* machine, Lips_Cell cell, Lips_Cell value)
     env = EnvParent(machine, env);
   }
   Lips_Cell* ptr = HashTableInsert(machine, env, cell, value);
-  GET_STR(cell)->refs++;
   if (ptr == NULL) {
     LIPS_THROW_ERROR(machine, "Value '%s' is already defined");
   }
@@ -1120,9 +1121,9 @@ Lips_Intern(Lips_Machine* machine, const char* name)
   size_t len = strlen(name);
   uint32_t hash = ComputeHashN(name, len);
   do {
-    Lips_Cell ptr = HashTableSearchStr(env, hash, name, len);
-    if (ptr) {
-      return ptr;
+    Node* node = HashTableSearchStr(env, hash, name, len);
+    if (node) {
+      return node->value;
     }
     env = EnvParent(machine, env);
   } while (env);
@@ -1135,9 +1136,9 @@ Lips_InternCell(Lips_Machine* machine, Lips_Cell cell)
   TYPE_CHECK(machine, LIPS_TYPE_SYMBOL|LIPS_TYPE_STRING, cell);
   HashTable* env = MachineEnv(machine);
   do {
-    Lips_Cell* ptr = HashTableSearch(env, cell);
+    Lips_Cell ptr = HashTableSearch(env, cell);
     if (ptr) {
-      return *ptr;
+      return ptr;
     }
     env = EnvParent(machine, env);
   } while (env);
@@ -1322,7 +1323,6 @@ StringCreateEmpty(Lips_Machine* machine, uint32_t n)
   StringData* str = BucketNew(bucket, sizeof(StringData));
   str->length = n;
   str->bucket_index = bucket - machine->str_buckets;
-  str->refs = 0;
   StringPool* pool = GetStringPool(machine, n+1);
   if (pool) {
     str->data = FindSpaceForString(pool, machine->alloc);
@@ -1355,10 +1355,6 @@ StringCreateWithHash(Lips_Machine* machine, const char* str, uint32_t n, uint32_
 void
 StringDestroy(Lips_Machine* machine, StringData* str)
 {
-  str->refs--;
-  if (str->refs > 0) {
-    return;
-  }
   StringPool* pool = GetStringPool(machine, str->length+1);
   if (pool) {
     RemoveString(pool, str->data);
@@ -1871,6 +1867,20 @@ EnvParent(Lips_Machine* machine, HashTable* env)
 }
 
 uint32_t
+NearestPowerOfTwo(uint32_t v)
+{
+  // https://stackoverflow.com/questions/466204/rounding-up-to-next-power-of-2
+  v--;
+  v |= v >> 1;
+  v |= v >> 2;
+  v |= v >> 4;
+  v |= v >> 8;
+  v |= v >> 16;
+  v++;
+  return v;
+}
+
+uint32_t
 ComputeHash(const char* string)
 {
   // https://cp-algorithms.com/string/string-hashing.html
@@ -1915,6 +1925,7 @@ void
 HashTableReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity)
 {
   assert(capacity > ht->allocated);
+  capacity = NearestPowerOfTwo(capacity);
   if (HASH_TABLE_GET_SIZE(ht) == 0) {
     assert(StackRelease(&machine->stack, HASH_TABLE_DATA(ht)) == ht->allocated * sizeof(Node));
   }
@@ -1949,63 +1960,83 @@ HashTableInsert(Lips_Machine* machine,
     HashTableReserve(machine, ht, sz);
   }
   Node* data = HASH_TABLE_DATA(ht);
-  uint32_t id = GET_STR(key)->hash % ht->allocated;
+  Node obj;
+  obj.key = key;
+  obj.value = value;
+  obj.psl = 0;
+  uint32_t id = GET_STR(key)->hash & (ht->allocated-1);
   while (NODE_VALID(data[id])) {
-    // Hash table already has this element
     if (StringEqual(GET_STR(data[id].key), GET_STR(key))) {
+      // return null if already have this key
       return NULL;
     }
-    id = (id+1) % ht->allocated;
+    if (obj.psl > data[id].psl) {
+      // do swap
+      Node temp;
+      memcpy(&temp, &obj, sizeof(Node));
+      memcpy(&obj, &data[id], sizeof(Node));
+      memcpy(&data[id], &temp, sizeof(Node));
+    }
+    obj.psl++;
+    id = (id + 1) & (ht->allocated-1);
   }
-  data[id].key = key;
-  data[id].value = value;
+  // insert element
+  memcpy(&data[id], &obj, sizeof(Node));
   // increment the size counter
   HASH_TABLE_SET_SIZE(ht, HASH_TABLE_GET_SIZE(ht)+1);
   return &data[id].value;
 }
 
-Lips_Cell*
+Lips_Cell
 HashTableSearch(const HashTable* ht, Lips_Cell key)
 {
   Node* data = HASH_TABLE_DATA(ht);
   StringData* str = GET_STR(key);
-  uint32_t i = 0;
-  uint32_t id = str->hash;
-  while (i < HASH_TABLE_GET_SIZE(ht)) {
-    id = id % ht->allocated;
-    if (NODE_VALID(data[id])) {
-      if (GET_STR(data[id].key)->hash == str->hash && strcmp(GET_STR(data[id].key)->data, str->data) == 0)
-        return &data[id].value;
-      i++;
-      // linear probing
-      id++;
-    } else {
-      return NULL;
+  if (ht->allocated > 0) {
+    size_t psl = 0;
+    uint32_t id = str->hash & (ht->allocated-1);
+    while (1) {
+      if (!NODE_VALID(data[id])) {
+        return NULL;
+      }
+      if (StringEqual(str, GET_STR(data[id].key))) {
+        return data[id].value;
+      }
+      if (psl > data[id].psl) {
+        return NULL;
+      }
+      id = (id+1) & (ht->allocated-1);
+      psl++;
     }
+    // unreachable
   }
   return NULL;
 }
 
-Lips_Cell
+Node*
 HashTableSearchStr(const HashTable* ht, uint32_t hash, const char* key, uint32_t n)
 {
   Node* data = HASH_TABLE_DATA(ht);
-  uint32_t i = 0;
-  uint32_t id = hash;
-  while (i < HASH_TABLE_GET_SIZE(ht)) {
-    id = id % ht->allocated;
-    if (NODE_VALID(data[id])) {
-      Lips_Cell val = data[id].key;
-      if (hash == GET_STR(val)->hash &&
-          GET_STR(val)->length == n &&
-          strncmp(GET_STR(val)->data, key, n) == 0)
-        return data[id].key;
-      i++;
-      // linear probing
-      id++;
-    } else {
-      return NULL;
+  size_t psl = 0;
+  if (ht->allocated > 0) {
+    uint32_t id = hash & (ht->allocated-1);
+    while (1) {
+      if (!NODE_VALID(data[id])) {
+        return NULL;
+      }
+      StringData* str = GET_STR(data[id].key);
+      if (hash == str->hash &&
+          n == str->length &&
+          strncmp(key, str->data, n) == 0) {
+        return &data[id];
+      }
+      if (psl > data[id].psl) {
+        return NULL;
+      }
+      id = (id+1) & (ht->allocated-1);
+      psl++;
     }
+    // unreachable
   }
   return NULL;
 }
@@ -2131,13 +2162,13 @@ DefineWithCurrent(Lips_Machine* machine, Lips_Cell name, Lips_Cell value)
   HashTable* env = MachineEnv(machine);
   Lips_Cell* ptr = HashTableInsert(machine, env,
                                    name, value);
-  GET_STR(name)->refs++;
   assert(ptr && "Internal error(value is already defined)");
 }
 
 uint32_t
 CheckArgumentCount(Lips_Machine* machine, Lips_Cell callable, Lips_Cell args)
 {
+  TYPE_CHECK_FORCED(LIPS_TYPE_FUNCTION|LIPS_TYPE_MACRO, callable);
   uint32_t numargs = GET_NUMARGS(callable) & (LIPS_NUM_ARGS_VAR-1);
   uint32_t variadic = GET_NUMARGS(callable) & LIPS_NUM_ARGS_VAR;
   uint32_t listlen = (args) ? Lips_ListLength(machine, args) : 0;
@@ -2500,6 +2531,7 @@ LIPS_DECLARE_FUNCTION(call)
   assert(numargs == 2);
   TYPE_CHECK(machine, LIPS_TYPE_SYMBOL, args[0]);
   TYPE_CHECK(machine, LIPS_TYPE_PAIR, args[1]);
+  // TODO: try to use eval loop, instead of recursive call to Lips_Eval
   return Lips_Invoke(machine, args[0], args[1]);
 }
 
@@ -2568,7 +2600,6 @@ LIPS_DECLARE_FUNCTION(concat)
   Lips_Cell cell = NewCell(machine);
   cell->type = LIPS_TYPE_STRING;
   GET_STR(cell) = StringCreateEmpty(machine, total_size);
-  GET_STR(cell)->refs++;
   char* curr = GET_STR_PTR(cell);
   // write argument contents to resulting string
   strcpy(curr, GET_STR_PTR(args[0]));
@@ -2596,7 +2627,6 @@ LIPS_DECLARE_FUNCTION(slurp)
   Lips_Cell cell = NewCell(machine);
   cell->type = LIPS_TYPE_STRING;
   GET_STR(cell) = StringCreateEmpty(machine, bytes);
-  GET_STR(cell)->refs++;
   // read file contents to the string
   char* buffer = GET_STR_PTR(cell);
   machine->read_file(file, buffer, bytes);
