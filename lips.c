@@ -130,7 +130,7 @@ static void IteratorNext(Iterator* it);
 
 static uint32_t PListSize(const HashTable* ht);
 static void PListDestroy(Lips_Machine* machine, HashTable* ht);
-static void PListReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity);
+static HashTable* PListReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity);
 static Lips_Cell PListInsert(Lips_Machine* machine, HashTable* ht, Lips_Cell key, Lips_Cell value);
 static Lips_Cell PListRemove(HashTable* ht, Lips_Cell key);
 
@@ -2142,48 +2142,54 @@ PListSize(const HashTable* ht)
 void
 PListDestroy(Lips_Machine* machine, HashTable* ht)
 {
-  uint32_t bytes = sizeof(HashTable) + ht->allocated * sizeof(Node);
-  machine->dealloc(ht, bytes);
+  if (ht) {
+    uint32_t bytes = sizeof(HashTable) + ht->allocated * sizeof(Node);
+    machine->dealloc(ht, bytes);
+  }
 }
 
-void
+HashTable*
 PListReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity)
 {
   Node* prev = NULL;
   uint32_t preallocated;
+  uint32_t old_size = 0;
+  capacity = NearestPowerOfTwo(capacity);
   if (ht) {
     assert(capacity > ht->allocated);
-    capacity = NearestPowerOfTwo(capacity);
     preallocated = ht->allocated;
     prev = HASH_TABLE_DATA(ht);
+    old_size = HASH_TABLE_GET_SIZE(ht);
   }
   ht = machine->alloc(sizeof(HashTable) + capacity * sizeof(Node));
+  ht->allocated = capacity;
+  ht->flags = 0;
+  ht->parent = 0;
   Node* data = HASH_TABLE_DATA(ht);
   for (uint32_t i = 0; i < capacity; i++) {
     data[i].value = NULL;
   }
   if (prev) {
-    if (HASH_TABLE_GET_SIZE(ht) > 0) {
-      uint32_t old_size = HASH_TABLE_GET_SIZE(ht);
-      HASH_TABLE_SET_SIZE(ht, 0);
+    if (old_size > 0) {
       for (uint32_t i = 0; HASH_TABLE_GET_SIZE(ht) < old_size; i++) {
         if (NODE_VALID(prev[i])) {
           PListInsert(machine, ht, prev[i].key, prev[i].value);
         }
       }
     }
-    machine->dealloc(prev, sizeof(HashTable) + preallocated * sizeof(Node));
+    machine->dealloc((HashTable*)prev - 1, sizeof(HashTable) + preallocated * sizeof(Node));
   }
+  return ht;
 }
 
 Lips_Cell
 PListInsert(Lips_Machine* machine, HashTable* ht, Lips_Cell key, Lips_Cell value)
 {
+  // TODO: assert non-string types
+  TYPE_CHECK_FORCED(LIPS_TYPE_STRING|LIPS_TYPE_SYMBOL, key);
   assert(value && "Can not insert null");
   if (ht == NULL) {
-    ht->allocated = 4;
-    ht->flags = 0;
-    ht = machine->alloc(sizeof(HashTable) + ht->allocated * sizeof(Node));
+    return NULL;
   }
   if (HASH_TABLE_GET_SIZE(ht) == ht->allocated) {
     uint32_t sz = (HASH_TABLE_GET_SIZE(ht) == 0) ? 1 : (HASH_TABLE_GET_SIZE(ht)<<1);
@@ -2245,6 +2251,7 @@ PListRemove(HashTable* ht, Lips_Cell key)
       id = next;
       next = (id+1) & (ht->allocated-1);
     }
+    HASH_TABLE_SET_SIZE(ht, HASH_TABLE_GET_SIZE(ht)-1);
     return ret;
   }
   return NULL;
@@ -2851,10 +2858,12 @@ LIPS_DECLARE_FUNCTION(plist)
     LIPS_THROW_ERROR(machine, "'plist' accepts only even number of arguments, got %u", numargs);
   }
   Lips_Cell ret = Lips_NewPList(machine);
-  PListReserve(machine, GET_PLIST(ret), numargs >> 1);
-  for (uint32_t i = 0; i < numargs; i += 2) {
-    Lips_Cell key = args[i], value = args[i+1];
-    PListInsert(machine, GET_PLIST(ret), key, value);
+  if (numargs > 0) {
+    GET_PLIST(ret) = PListReserve(machine, GET_PLIST(ret), numargs >> 1);
+    for (uint32_t i = 0; i < numargs; i += 2) {
+      Lips_Cell key = args[i], value = args[i+1];
+      PListInsert(machine, GET_PLIST(ret), key, value);
+    }
   }
   return ret;
 }
