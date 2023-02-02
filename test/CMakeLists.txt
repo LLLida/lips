@@ -8,3 +8,4 @@ endfunction ()
 
 make_test(test1_basic)
 make_test(test2_gc)
+make_test(test3_plist)

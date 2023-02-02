@@ -7,6 +7,7 @@
 
 #include "lips.h"
 
+
 /// CONSTANTS
 
 // number of values in one bucket
@@ -32,6 +33,7 @@ typedef struct StringData StringData;
 typedef struct Token Token;
 typedef struct EvalState EvalState;
 typedef struct StringPool StringPool;
+typedef struct PListElem PListElem;
 
 
 /// MACROS
@@ -47,11 +49,12 @@ typedef struct StringPool StringPool;
 #define IS_DIGIT(c) ((c) >= '0' && (c) <= '9')
 #define LOG_ERROR(machine, ...) snprintf(machine->errbuff, sizeof(machine->errbuff), __VA_ARGS__)
 #define TYPE_CHECK(machine, type, cell) if (!(GET_TYPE(cell) & (type))) LIPS_THROW_ERROR(machine, "Typecheck failed (%d & %d) at line %d", GET_TYPE(cell), type, __LINE__);
-#define TYPE_CHECK_FORCED(type, cell) do {                              \
-    assert((GET_TYPE(cell) & (type)) && "Typecheck failed"); \
+#define TYPE_CHECK_FORCED(type, cell) do {                      \
+    assert((GET_TYPE(cell) & (type)) && "Typecheck failed");    \
   } while (0)
 #define GET_STR(cell) ((cell)->data.str)
 #define GET_STR_PTR(cell) GET_STR(cell)->data
+#define GET_PLIST(cell) ((cell)->data.ht)
 
 
 /// LIST OF FUNCTIONS
@@ -93,7 +96,7 @@ static void* StackRequire(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
 // number of released bytes returned
 static uint32_t StackRelease(Stack* stack, void* data);
 static void* StackRequireFromBack(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
-                                 Stack* stack, uint32_t bytes);
+                                  Stack* stack, uint32_t bytes);
 static void* StackReleaseFromBack(Stack* stack, uint32_t bytes);
 
 static EvalState* PushEvalState(Lips_Machine* machine);
@@ -112,18 +115,24 @@ static uint32_t NearestPowerOfTwo(uint32_t v);
 static uint32_t ComputeHash(const char* string) LIPS_PURE_FUNCTION;
 // compute hash of sized string(no null terminator at end)
 static uint32_t ComputeHashN(const char* string, uint32_t n) LIPS_PURE_FUNCTION;
-static HashTable* HashTableCreate(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
-                                  Stack* stack);
-static void HashTableDestroy(Stack* stack, HashTable* ht);
-static void HashTableReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity);
-static Lips_Cell* HashTableInsert(Lips_Machine* machine,
-                                  HashTable* ht, Lips_Cell key, Lips_Cell value);
+static HashTable* EnvCreate(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc,
+                            Stack* stack);
+static void EnvDestroy(Stack* stack, HashTable* ht);
+static void EnvReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity);
+static Lips_Cell* EnvInsert(Lips_Machine* machine,
+                            HashTable* ht, Lips_Cell key, Lips_Cell value);
 static Lips_Cell HashTableSearch(const HashTable* ht, Lips_Cell key);
 static Node* HashTableSearchStr(const HashTable* ht, uint32_t hash, const char* key, uint32_t n);
 static void HashTableIterate(HashTable* ht, Iterator* it);
 static int IteratorIsEmpty(const Iterator* it);
 static void IteratorGet(const Iterator* it, Lips_Cell* key, Lips_Cell* value);
 static void IteratorNext(Iterator* it);
+
+static uint32_t PListSize(const HashTable* ht);
+static void PListDestroy(Lips_Machine* machine, HashTable* ht);
+static void PListReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity);
+static Lips_Cell PListInsert(Lips_Machine* machine, HashTable* ht, Lips_Cell key, Lips_Cell value);
+static Lips_Cell PListRemove(HashTable* ht, Lips_Cell key);
 
 static Bucket* FindBucketForString(Lips_Machine* machine);
 
@@ -141,6 +150,9 @@ static Lips_Cell EvalNonPair(Lips_Machine* machine, Lips_Cell cell);
 static void Mark(Lips_Machine* machine);
 static void Sweep(Lips_Machine* machine);
 
+
+/// builtin lips functions and macros
+
 static LIPS_DECLARE_FUNCTION(list);
 static LIPS_DECLARE_FUNCTION(car);
 static LIPS_DECLARE_FUNCTION(cdr);
@@ -153,6 +165,10 @@ static LIPS_DECLARE_FUNCTION(format);
 static LIPS_DECLARE_FUNCTION(concat);
 static LIPS_DECLARE_FUNCTION(slurp);
 static LIPS_DECLARE_FUNCTION(load);
+static LIPS_DECLARE_FUNCTION(plist);
+static LIPS_DECLARE_FUNCTION(get);
+static LIPS_DECLARE_FUNCTION(insert);
+static LIPS_DECLARE_FUNCTION(remove);
 
 static LIPS_DECLARE_MACRO(lambda);
 static LIPS_DECLARE_MACRO(macro);
@@ -165,6 +181,7 @@ static LIPS_DECLARE_MACRO(catch);
 static LIPS_DECLARE_MACRO(intern);
 // TODO: implement cond
 
+
 /// STRUCTS
 
 // Copy-On-Write string
@@ -215,21 +232,30 @@ struct Lips_Value {
   // 31 bit - garbage collector mark
   uint32_t type;
   union {
+    // integer
     int64_t integer;
+    // real
     double real;
+    // string, symbol or keyword
     StringData* str;
+    // list
     struct {
       Lips_Value* head;
       Lips_Value* tail;
     } list;
+    // plist
+    HashTable* ht;
+    // lisp function or lisp macro
     struct {
       Lips_Value* args;
       Lips_Value* body;
     } lfunc;
+    // c function
     struct {
       Lips_Func ptr;
       void* udata;
     } cfunc;
+    // c macro
     struct {
       Lips_Macro ptr;
       void* udata;
@@ -363,6 +389,7 @@ struct Lips_Machine {
 };
 #define CURRENT_EVAL_STATE(interp) (EvalState*)((interp)->stack.data + (interp)->evalpos)
 
+
 /// FUNCTIONS
 
 LIPS_COLD_FUNCTION Lips_Machine*
@@ -392,13 +419,13 @@ Lips_CreateMachine(const Lips_MachineCreateInfo* info)
   machine->numstr_buckets = 0;
   CreateStack(machine->alloc, &machine->stack, info->initial_stack_size);
   // create root environment
-  HashTable* env = HashTableCreate(machine->alloc, machine->dealloc, &machine->stack);
+  HashTable* env = EnvCreate(machine->alloc, machine->dealloc, &machine->stack);
   env->parent = STACK_INVALID_POS;
   machine->envpos = ((uint8_t*)env - machine->stack.data);
   machine->evalpos = STACK_INVALID_POS;
   machine->catchpos = STACK_INVALID_POS;
   // preallocate space for hash table to speed things up
-  HashTableReserve(machine, env, 64);
+  EnvReserve(machine, env, 64);
   // define builtins
   machine->default_file = Lips_NewString(machine, "<eval>");
   machine->S_nil = Lips_Define(machine, "nil", Lips_NewPair(machine, NULL, NULL));
@@ -424,6 +451,10 @@ Lips_CreateMachine(const Lips_MachineCreateInfo* info)
   LIPS_DEFINE_FUNCTION(machine, concat, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_FUNCTION(machine, slurp, LIPS_NUM_ARGS_1, NULL);
   LIPS_DEFINE_FUNCTION(machine, load, LIPS_NUM_ARGS_1, NULL);
+  LIPS_DEFINE_FUNCTION(machine, plist, LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_FUNCTION(machine, get, LIPS_NUM_ARGS_2, NULL);
+  LIPS_DEFINE_FUNCTION(machine, insert, LIPS_NUM_ARGS_3, NULL);
+  LIPS_DEFINE_FUNCTION(machine, remove, LIPS_NUM_ARGS_2, NULL);
 
   LIPS_DEFINE_MACRO(machine, lambda, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(machine, macro, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
@@ -785,6 +816,15 @@ Lips_NewPair(Lips_Machine* machine, Lips_Cell head, Lips_Cell tail)
 }
 
 Lips_Cell
+Lips_NewPList(Lips_Machine* machine)
+{
+  Lips_Cell cell = NewCell(machine);
+  cell->type = LIPS_TYPE_PLIST;
+  cell->data.ht = NULL;
+  return cell;
+}
+
+Lips_Cell
 Lips_NewList(Lips_Machine* machine, uint32_t numCells, Lips_Cell* cells)
 {
   // important optimization: don't allocate unnecessary lists when we can just return nil
@@ -920,6 +960,10 @@ Lips_PrintCell(Lips_Machine* machine, Lips_Cell cell, char* buff, uint32_t size)
           cell = GET_HEAD(cell);
           counter++;
           goto skip;
+        case LIPS_TYPE_PLIST:
+          // TODO: print all of plist's elements
+          PRINT("<plist(%u)>", PListSize(GET_PLIST(GET_HEAD(cell))));
+          break;
         case LIPS_TYPE_FUNCTION:
         case LIPS_TYPE_C_FUNCTION: {
           uint32_t num = GET_NUMARGS(GET_HEAD(cell));
@@ -978,6 +1022,10 @@ Lips_PrintCell(Lips_Machine* machine, Lips_Cell cell, char* buff, uint32_t size)
       break;
     case LIPS_TYPE_KEYWORD:
       PRINT(":%s", GET_STR_PTR(cell));
+      break;
+    case LIPS_TYPE_PLIST:
+      // TODO: print all of plist's elements
+      PRINT("<plist(%u)>", PListSize(GET_PLIST(cell)));
       break;
     case LIPS_TYPE_FUNCTION:
     case LIPS_TYPE_C_FUNCTION: {
@@ -1091,7 +1139,7 @@ Lips_Define(Lips_Machine* machine, const char* name, Lips_Cell cell)
     env = EnvParent(machine, env);
   }
   Lips_Cell key = Lips_NewSymbol(machine, name);
-  Lips_Cell* ptr = HashTableInsert(machine, env, key, cell);
+  Lips_Cell* ptr = EnvInsert(machine, env, key, cell);
   if (ptr == NULL) {
     LIPS_THROW_ERROR(machine, "Value '%s' is already defined", name);
   }
@@ -1107,7 +1155,7 @@ Lips_DefineCell(Lips_Machine* machine, Lips_Cell cell, Lips_Cell value)
   while (env->flags & HASH_TABLE_CONSTANT_FLAG) {
     env = EnvParent(machine, env);
   }
-  Lips_Cell* ptr = HashTableInsert(machine, env, cell, value);
+  Lips_Cell* ptr = EnvInsert(machine, env, cell, value);
   if (ptr == NULL) {
     LIPS_THROW_ERROR(machine, "Value '%s' is already defined");
   }
@@ -1256,6 +1304,9 @@ Lips_CDR(Lips_Machine* machine, Lips_Cell cell)
   return GET_TAIL(cell);
 }
 
+
+/// Helper functions
+
 void*
 DefaultAlloc(size_t bytes)
 {
@@ -1305,13 +1356,16 @@ DestroyCell(Lips_Machine* machine, Lips_Cell cell) {
   case LIPS_TYPE_C_MACRO:
     // do nothing
     break;
+  case LIPS_TYPE_PAIR:
+    // do nothing
+    break;
   case LIPS_TYPE_STRING:
   case LIPS_TYPE_SYMBOL:
   case LIPS_TYPE_KEYWORD:
     StringDestroy(machine, GET_STR(cell));
     break;
-  case LIPS_TYPE_PAIR:
-
+  case LIPS_TYPE_PLIST:
+    PListDestroy(machine, GET_PLIST(cell));
     break;
   }
 }
@@ -1835,7 +1889,7 @@ MachineEnv(Lips_Machine* machine)
 HashTable*
 PushEnv(Lips_Machine* machine)
 {
-  HashTable* env = HashTableCreate(machine->alloc, machine->dealloc, &machine->stack);
+  HashTable* env = EnvCreate(machine->alloc, machine->dealloc, &machine->stack);
   env->parent = machine->envpos;
   machine->envpos = (uint8_t*)env - machine->stack.data;
   return env;
@@ -1852,7 +1906,7 @@ PopEnv(Lips_Machine* machine)
   //   IteratorGet(&it, &key, &cell);
   //   StringDestroy(machine, GET_STR(key));
   // }
-  HashTableDestroy(&machine->stack, env);
+  EnvDestroy(&machine->stack, env);
   machine->envpos = env->parent;
 }
 
@@ -1908,7 +1962,7 @@ ComputeHashN(const char* string, uint32_t n)
 }
 
 HashTable*
-HashTableCreate(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* stack)
+EnvCreate(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* stack)
 {
   HashTable* ht = StackRequire(alloc, dealloc, stack, sizeof(HashTable));
   memset(ht, 0, sizeof(HashTable));
@@ -1916,13 +1970,13 @@ HashTableCreate(Lips_AllocFunc alloc, Lips_DeallocFunc dealloc, Stack* stack)
 }
 
 void
-HashTableDestroy(Stack* stack, HashTable* ht)
+EnvDestroy(Stack* stack, HashTable* ht)
 {
   assert(StackRelease(stack, ht) == sizeof(HashTable) + ht->allocated * sizeof(Node));
 }
 
 void
-HashTableReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity)
+EnvReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity)
 {
   assert(capacity > ht->allocated);
   capacity = NearestPowerOfTwo(capacity);
@@ -1939,12 +1993,11 @@ HashTableReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity)
     data[i].value = NULL;
   }
   if (HASH_TABLE_GET_SIZE(ht) > 0) {
-    uint32_t oldSize = HASH_TABLE_GET_SIZE(ht);
+    uint32_t old_size = HASH_TABLE_GET_SIZE(ht);
     HASH_TABLE_SET_SIZE(ht, 0);
-    for (uint32_t i = 0; i < preallocated; i++) {
+    for (uint32_t i = 0; HASH_TABLE_GET_SIZE(ht) < old_size; i++) {
       if (NODE_VALID(nodes[i])) {
-        HashTableInsert(machine, ht, nodes[i].key, nodes[i].value);
-        if (HASH_TABLE_GET_SIZE(ht) == oldSize) break;
+        EnvInsert(machine, ht, nodes[i].key, nodes[i].value);
       }
     }
     assert(StackRelease(&machine->stack, data + capacity) == preallocated * sizeof(Node));
@@ -1952,12 +2005,12 @@ HashTableReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity)
 }
 
 Lips_Cell*
-HashTableInsert(Lips_Machine* machine,
-                HashTable* ht, Lips_Cell key, Lips_Cell value) {
+EnvInsert(Lips_Machine* machine,
+          HashTable* ht, Lips_Cell key, Lips_Cell value) {
   assert(value && "Can not insert null");
   if (HASH_TABLE_GET_SIZE(ht) == ht->allocated) {
     uint32_t sz = (HASH_TABLE_GET_SIZE(ht) == 0) ? 1 : (HASH_TABLE_GET_SIZE(ht)<<1);
-    HashTableReserve(machine, ht, sz);
+    EnvReserve(machine, ht, sz);
   }
   Node* data = HASH_TABLE_DATA(ht);
   Node obj;
@@ -2078,6 +2131,125 @@ IteratorNext(Iterator* it)
   it->size--;
 }
 
+uint32_t
+PListSize(const HashTable* ht)
+{
+  if (ht)
+    return HASH_TABLE_GET_SIZE(ht);
+  return 0;
+}
+
+void
+PListDestroy(Lips_Machine* machine, HashTable* ht)
+{
+  uint32_t bytes = sizeof(HashTable) + ht->allocated * sizeof(Node);
+  machine->dealloc(ht, bytes);
+}
+
+void
+PListReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity)
+{
+  Node* prev = NULL;
+  uint32_t preallocated;
+  if (ht) {
+    assert(capacity > ht->allocated);
+    capacity = NearestPowerOfTwo(capacity);
+    preallocated = ht->allocated;
+    prev = HASH_TABLE_DATA(ht);
+  }
+  ht = machine->alloc(sizeof(HashTable) + capacity * sizeof(Node));
+  Node* data = HASH_TABLE_DATA(ht);
+  for (uint32_t i = 0; i < capacity; i++) {
+    data[i].value = NULL;
+  }
+  if (prev) {
+    if (HASH_TABLE_GET_SIZE(ht) > 0) {
+      uint32_t old_size = HASH_TABLE_GET_SIZE(ht);
+      HASH_TABLE_SET_SIZE(ht, 0);
+      for (uint32_t i = 0; HASH_TABLE_GET_SIZE(ht) < old_size; i++) {
+        if (NODE_VALID(prev[i])) {
+          PListInsert(machine, ht, prev[i].key, prev[i].value);
+        }
+      }
+    }
+    machine->dealloc(prev, sizeof(HashTable) + preallocated * sizeof(Node));
+  }
+}
+
+Lips_Cell
+PListInsert(Lips_Machine* machine, HashTable* ht, Lips_Cell key, Lips_Cell value)
+{
+  assert(value && "Can not insert null");
+  if (ht == NULL) {
+    ht->allocated = 4;
+    ht->flags = 0;
+    ht = machine->alloc(sizeof(HashTable) + ht->allocated * sizeof(Node));
+  }
+  if (HASH_TABLE_GET_SIZE(ht) == ht->allocated) {
+    uint32_t sz = (HASH_TABLE_GET_SIZE(ht) == 0) ? 1 : (HASH_TABLE_GET_SIZE(ht)<<1);
+    PListReserve(machine, ht, sz);
+  }
+  Node* data = HASH_TABLE_DATA(ht);
+  Node obj;
+  obj.key = key;
+  obj.value = value;
+  obj.psl = 0;
+  uint32_t id = GET_STR(key)->hash & (ht->allocated-1);
+  while (NODE_VALID(data[id])) {
+    if (StringEqual(GET_STR(key), GET_STR(data[id].key))) {
+      return NULL;
+    }
+    if (obj.psl > data[id].psl) {
+      // do swap
+      Node temp;
+      memcpy(&temp, &obj, sizeof(Node));
+      memcpy(&obj, &data[id], sizeof(Node));
+      memcpy(&data[id], &obj, sizeof(Node));
+    }
+    obj.psl++;
+    id = (id+1) & (ht->allocated-1);
+  }
+  // insert element
+  memcpy(&data[id], &obj, sizeof(Node));
+  // increment the size counter
+  HASH_TABLE_SET_SIZE(ht, HASH_TABLE_GET_SIZE(ht)+1);
+  return data[id].value;
+}
+
+Lips_Cell
+PListRemove(HashTable* ht, Lips_Cell key)
+{
+  if (ht && ht->allocated) {
+    Node* data = HASH_TABLE_DATA(ht);
+    uint32_t psl = 0;
+    uint32_t id = GET_STR(key)->hash & (ht->allocated-1);
+    while (1) {
+      if (!NODE_VALID(data[id])) {
+        return NULL;
+      }
+      if (StringEqual(GET_STR(key), GET_STR(data[id].key))) {
+        break;
+      }
+      if (psl > data[id].psl) {
+        return NULL;
+      }
+      id = (id+1) & (ht->allocated-1);
+      psl++;
+    }
+    Lips_Cell ret = data[id].value;
+    uint32_t next = (id+1) & (ht->allocated-1);
+    // shift elements from right with psl > 0
+    while (data[next].psl > 0) {
+      memcpy(&data[id], &data[next], sizeof(Node));
+      data[id].psl--;
+      id = next;
+      next = (id+1) & (ht->allocated-1);
+    }
+    return ret;
+  }
+  return NULL;
+}
+
 uint32_t GetRealNumargs(Lips_Machine* machine, Lips_Cell callable)
 {
   (void)machine;
@@ -2160,8 +2332,8 @@ DefineWithCurrent(Lips_Machine* machine, Lips_Cell name, Lips_Cell value)
   TYPE_CHECK_FORCED(LIPS_TYPE_SYMBOL|LIPS_TYPE_STRING, name);
   assert(value);
   HashTable* env = MachineEnv(machine);
-  Lips_Cell* ptr = HashTableInsert(machine, env,
-                                   name, value);
+  Lips_Cell* ptr = EnvInsert(machine, env,
+                             name, value);
   assert(ptr && "Internal error(value is already defined)");
 }
 
@@ -2188,8 +2360,8 @@ DefineArgumentList(Lips_Machine* machine, Lips_Cell callable, Lips_Cell argvalue
   TYPE_CHECK_FORCED(LIPS_TYPE_FUNCTION|LIPS_TYPE_MACRO, callable);
   TYPE_CHECK_FORCED(LIPS_TYPE_PAIR, argvalues);
   // reserve space for hash table
-  HashTableReserve(machine, MachineEnv(machine),
-                   GetRealNumargs(machine, callable));
+  EnvReserve(machine, MachineEnv(machine),
+             GetRealNumargs(machine, callable));
   // define variables in a new environment
   Lips_Cell argnames = GET_LFUNC(callable).args;
   uint32_t count = (GET_NUMARGS(callable) & (LIPS_NUM_ARGS_VAR-1));
@@ -2209,8 +2381,8 @@ DefineArgumentArray(Lips_Machine* machine, Lips_Cell callable,
 {
   TYPE_CHECK_FORCED(LIPS_TYPE_FUNCTION, callable);
   // reserve space for hash table
-  HashTableReserve(machine, MachineEnv(machine),
-                   GetRealNumargs(machine, callable));
+  EnvReserve(machine, MachineEnv(machine),
+             GetRealNumargs(machine, callable));
   // define variables in a new environment
   Lips_Cell argnames = GET_LFUNC(callable).args;
   uint32_t count = (GET_NUMARGS(callable) & (LIPS_NUM_ARGS_VAR-1));
@@ -2245,6 +2417,7 @@ EvalNonPair(Lips_Machine* machine, Lips_Cell cell)
   case LIPS_TYPE_C_FUNCTION:
   case LIPS_TYPE_MACRO:
   case LIPS_TYPE_C_MACRO:
+  case LIPS_TYPE_PLIST:
     return cell;
   case LIPS_TYPE_SYMBOL:
     return Lips_InternCell(machine, cell);
@@ -2266,7 +2439,7 @@ Mark(Lips_Machine* machine)
     case string:
       /* types that do not contain references to other cells */
       cell->marked = true;
-      return;
+    return;
     case function:
       Mark(cell->func_args);
       Mark(cell->func_body);
@@ -2332,6 +2505,14 @@ Mark(Lips_Machine* machine)
           goto cycle;
         }
         break;
+      case LIPS_TYPE_PLIST:
+        if (value->type & MARK_MASK) {
+          depth--;
+        } else {
+          value->type |= MARK_MASK;
+          // TODO: mark plist elements in some efficient way
+        }
+        break;
       }
       if (depth > 0) {
         value = *prev;
@@ -2376,7 +2557,7 @@ Sweep(Lips_Machine* machine)
 }
 
 
-/// Lisp functions
+/// Implementation of lisp functions and macros
 
 LIPS_DECLARE_FUNCTION(list)
 {
@@ -2663,6 +2844,52 @@ LIPS_DECLARE_FUNCTION(load)
   return ret;
 }
 
+LIPS_DECLARE_FUNCTION(plist)
+{
+  (void)udata;
+  if (numargs & 1) {
+    LIPS_THROW_ERROR(machine, "'plist' accepts only even number of arguments, got %u", numargs);
+  }
+  Lips_Cell ret = Lips_NewPList(machine);
+  PListReserve(machine, GET_PLIST(ret), numargs >> 1);
+  for (uint32_t i = 0; i < numargs; i += 2) {
+    Lips_Cell key = args[i], value = args[i+1];
+    PListInsert(machine, GET_PLIST(ret), key, value);
+  }
+  return ret;
+}
+
+LIPS_DECLARE_FUNCTION(get)
+{
+  (void)udata;
+  (void)numargs;
+  Lips_Cell plist = args[0], key = args[1];
+  Lips_Cell ret = HashTableSearch(GET_PLIST(plist), key);
+  if (ret == NULL)
+    ret = machine->S_nil;
+  return ret;
+}
+
+LIPS_DECLARE_FUNCTION(insert)
+{
+  (void)udata;
+  (void)numargs;
+  Lips_Cell plist = args[0], key = args[1], value = args[2];
+  Lips_Cell ret = PListInsert(machine, GET_PLIST(plist), key, value);
+  return ret;
+}
+
+LIPS_DECLARE_FUNCTION(remove)
+{
+  (void)udata;
+  (void)numargs;
+  Lips_Cell plist = args[0], key = args[1];
+  Lips_Cell ret = PListRemove(GET_PLIST(plist), key);
+  if (ret == NULL)
+    ret = machine->S_nil;
+  return ret;
+}
+
 LIPS_DECLARE_MACRO(lambda)
 {
   TYPE_CHECK(machine, LIPS_TYPE_PAIR, GET_HEAD(args));
@@ -2689,7 +2916,7 @@ LIPS_DECLARE_MACRO(macro)
   Lips_Cell last = Lips_ListLastElement(machine, GET_HEAD(args), &len);
   if (len > 127) {
     LIPS_THROW_ERROR(machine,
-                    "Too many arguments(%u), in Lips language callables have up to 127 named arguments", len);
+                     "Too many arguments(%u), in Lips language callables have up to 127 named arguments", len);
   }
   if (last && Lips_IsSymbol(last) && strcmp(GET_STR_PTR(last), "...") == 0) {
     len--;

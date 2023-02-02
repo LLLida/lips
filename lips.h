@@ -67,8 +67,11 @@ enum {
   LIPS_TYPE_SYMBOL = 1<<3,
   // keyword
   LIPS_TYPE_KEYWORD = LIPS_TYPE_SYMBOL+1,
-  // listx
+  // list
   LIPS_TYPE_PAIR = 1<<4,
+  // plist - hash table
+  LIPS_TYPE_PLIST = LIPS_TYPE_PAIR+1,
+  // TODO: alist - red/black tree
   // function defined in Lips code
   LIPS_TYPE_FUNCTION = 1<<5,
   // function defined in C code
@@ -163,6 +166,7 @@ Lips_Cell Lips_NewSymbolN(Lips_Machine* machine, const char* str, uint32_t n);
 Lips_Cell Lips_NewKeyword(Lips_Machine* machine, const char* str);
 Lips_Cell Lips_NewKeywordN(Lips_Machine* machine, const char* str, uint32_t n);
 Lips_Cell Lips_NewPair(Lips_Machine* machine, Lips_Cell head, Lips_Cell tail);
+Lips_Cell Lips_NewPList(Lips_Machine* machine);
 Lips_Cell Lips_NewList(Lips_Machine* machine, uint32_t numCells, Lips_Cell* cells);
 Lips_Cell Lips_NewFunction(Lips_Machine* machine, Lips_Cell args, Lips_Cell body, uint8_t numargs);
 Lips_Cell Lips_NewMacro(Lips_Machine* machine, Lips_Cell args, Lips_Cell body, uint8_t numargs);
