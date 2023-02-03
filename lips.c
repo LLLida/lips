@@ -328,6 +328,13 @@ struct EvalState {
 #define ES_CODE(es) (es)->data.exec.code
 #define ES_CATCH_PARENT(es) (es)->data.exec.parent
 
+typedef union {
+
+  Lips_Cell cell;
+  Iterator iterator;
+
+} MarkState;
+
 #define NUM_STRING_POOL_SIZES 5
 static const uint32_t string_pool_sizes[NUM_STRING_POOL_SIZES] = { 4, 8, 16, 32, 64 };
 
@@ -2245,12 +2252,14 @@ PListRemove(HashTable* ht, Lips_Cell key)
     Lips_Cell ret = data[id].value;
     uint32_t next = (id+1) & (ht->allocated-1);
     // shift elements from right with psl > 0
-    while (data[next].psl > 0) {
+    while (NODE_VALID(data[next]) && data[next].psl > 0) {
       memcpy(&data[id], &data[next], sizeof(Node));
       data[id].psl--;
       id = next;
       next = (id+1) & (ht->allocated-1);
     }
+    // invalidate
+    data[id].value = NULL;
     HASH_TABLE_SET_SIZE(ht, HASH_TABLE_GET_SIZE(ht)-1);
     return ret;
   }
@@ -2463,13 +2472,16 @@ Mark(Lips_Machine* machine)
   Lips_Cell key;
   Lips_Cell value;
   uint32_t depth;
-  Lips_Cell* prev;
+  MarkState* state;
   do {
     for (HashTableIterate(env, &it); !IteratorIsEmpty(&it); IteratorNext(&it)) {
       IteratorGet(&it, &key, &value);
       key->type |= MARK_MASK;
       depth = 1;
+      char buff[256];
     cycle:
+      Lips_PrintCell(machine, value, buff, sizeof(buff));
+      /* printf("marked %s\n", buff); */
       switch (GET_TYPE(value)) {
       default: assert(0 && "internal error");
       case LIPS_TYPE_INTEGER:
@@ -2489,9 +2501,10 @@ Mark(Lips_Machine* machine)
           depth--;
         } else {
           value->type |= MARK_MASK;
-          prev = StackRequire(machine->alloc, machine->dealloc,
-                              &machine->stack, sizeof(Lips_Cell));
-          *prev = GET_LFUNC(value).args;
+          state = StackRequire(machine->alloc, machine->dealloc,
+                              &machine->stack, sizeof(MarkState));
+          state->cell = GET_LFUNC(value).args;
+          state->iterator.size = UINT32_MAX;
           value = GET_LFUNC(value).body;
           depth++;
           goto cycle;
@@ -2503,9 +2516,10 @@ Mark(Lips_Machine* machine)
         } else {
           value->type |= MARK_MASK;
           if (GET_HEAD(value)) {
-            prev = StackRequire(machine->alloc, machine->dealloc,
-                                &machine->stack, sizeof(Lips_Cell));
-            *prev = GET_TAIL(value);
+            state = StackRequire(machine->alloc, machine->dealloc,
+                                 &machine->stack, sizeof(MarkState));
+            state->iterator.size = UINT32_MAX;
+            state->cell = GET_TAIL(value);
             value = GET_HEAD(value);
             depth++;
           }
@@ -2517,20 +2531,43 @@ Mark(Lips_Machine* machine)
           depth--;
         } else {
           value->type |= MARK_MASK;
-          // TODO: mark plist elements in some efficient way
+          state = StackRequire(machine->alloc, machine->dealloc,
+                               &machine->stack, sizeof(MarkState));
+          HashTableIterate(GET_PLIST(value), &state->iterator);
+          IteratorGet(&state->iterator, &key, &value);
+          IteratorNext(&state->iterator);
+          key->type |= MARK_MASK;
+          depth++;
+          goto cycle;
         }
         break;
       }
+    pop:
       if (depth > 0) {
-        value = *prev;
-        assert(StackRelease(&machine->stack, prev) == sizeof(Lips_Cell));
-        while (!value && depth > 1) {
-          prev--;
-          depth--;
-          value = *prev;
-          assert(StackRelease(&machine->stack, prev) == sizeof(Lips_Cell));
-        }
-        if (value) {
+        if (state->iterator.size == UINT32_MAX) {
+          // list
+          value = state->cell;
+          assert(StackRelease(&machine->stack, state) == sizeof(MarkState));
+          if (!value) {
+            state--;
+            depth--;
+            goto pop;
+          }
+          if (value) {
+            goto cycle;
+          }
+        } else {
+          // plist
+          if (IteratorIsEmpty(&state->iterator)) {
+            assert(StackRelease(&machine->stack, state) == sizeof(MarkState));
+            state--;
+            depth--;
+            goto pop;
+          }
+          IteratorGet(&state->iterator, &key, &value);
+          IteratorNext(&state->iterator);
+          key->type |= MARK_MASK;
+          depth++;
           goto cycle;
         }
       }
@@ -2873,6 +2910,11 @@ LIPS_DECLARE_FUNCTION(get)
   (void)udata;
   (void)numargs;
   Lips_Cell plist = args[0], key = args[1];
+  if (GET_TYPE(plist) != LIPS_TYPE_PLIST) {
+    LIPS_THROW_ERROR(machine, "get: first argument should be an plist");
+  }
+  if (GET_PLIST(plist) == NULL)
+    return machine->S_nil;
   Lips_Cell ret = HashTableSearch(GET_PLIST(plist), key);
   if (ret == NULL)
     ret = machine->S_nil;
@@ -2884,6 +2926,9 @@ LIPS_DECLARE_FUNCTION(insert)
   (void)udata;
   (void)numargs;
   Lips_Cell plist = args[0], key = args[1], value = args[2];
+  if (GET_TYPE(plist) != LIPS_TYPE_PLIST) {
+    LIPS_THROW_ERROR(machine, "insert: first argument should be an plist");
+  }
   Lips_Cell ret = PListInsert(machine, GET_PLIST(plist), key, value);
   return ret;
 }
@@ -2893,6 +2938,9 @@ LIPS_DECLARE_FUNCTION(remove)
   (void)udata;
   (void)numargs;
   Lips_Cell plist = args[0], key = args[1];
+  if (GET_TYPE(plist) != LIPS_TYPE_PLIST) {
+    LIPS_THROW_ERROR(machine, "remove: first argument should be an plist");
+  }
   Lips_Cell ret = PListRemove(GET_PLIST(plist), key);
   if (ret == NULL)
     ret = machine->S_nil;
@@ -2996,3 +3044,7 @@ LIPS_DECLARE_MACRO(intern)
   Lips_Cell cell = Lips_InternCell(machine, GET_HEAD(args));
   return cell;
 }
+
+// Local Variables:
+// tab-width: 2
+// End:
