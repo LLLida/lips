@@ -123,6 +123,7 @@ static Lips_Cell* EnvInsert(Lips_Machine* machine,
                             HashTable* ht, Lips_Cell key, Lips_Cell value);
 static Lips_Cell HashTableSearch(const HashTable* ht, Lips_Cell key);
 static Node* HashTableSearchStr(const HashTable* ht, uint32_t hash, const char* key, uint32_t n);
+static Node* HashTableInsert(HashTable* ht, Lips_Cell key, Lips_Cell value);
 static void HashTableIterate(HashTable* ht, Iterator* it);
 static int IteratorIsEmpty(const Iterator* it);
 static void IteratorGet(const Iterator* it, Lips_Cell* key, Lips_Cell* value);
@@ -169,6 +170,7 @@ static LIPS_DECLARE_FUNCTION(plist);
 static LIPS_DECLARE_FUNCTION(get);
 static LIPS_DECLARE_FUNCTION(insert);
 static LIPS_DECLARE_FUNCTION(remove);
+static LIPS_DECLARE_FUNCTION(cons);
 
 static LIPS_DECLARE_MACRO(lambda);
 static LIPS_DECLARE_MACRO(macro);
@@ -462,6 +464,7 @@ Lips_CreateMachine(const Lips_MachineCreateInfo* info)
   LIPS_DEFINE_FUNCTION(machine, get, LIPS_NUM_ARGS_2, NULL);
   LIPS_DEFINE_FUNCTION(machine, insert, LIPS_NUM_ARGS_3, NULL);
   LIPS_DEFINE_FUNCTION(machine, remove, LIPS_NUM_ARGS_2, NULL);
+  LIPS_DEFINE_FUNCTION(machine, cons, LIPS_NUM_ARGS_2, NULL);
 
   LIPS_DEFINE_MACRO(machine, lambda, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(machine, macro, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
@@ -2019,32 +2022,7 @@ EnvInsert(Lips_Machine* machine,
     uint32_t sz = (HASH_TABLE_GET_SIZE(ht) == 0) ? 1 : (HASH_TABLE_GET_SIZE(ht)<<1);
     EnvReserve(machine, ht, sz);
   }
-  Node* data = HASH_TABLE_DATA(ht);
-  Node obj;
-  obj.key = key;
-  obj.value = value;
-  obj.psl = 0;
-  uint32_t id = GET_STR(key)->hash & (ht->allocated-1);
-  while (NODE_VALID(data[id])) {
-    if (StringEqual(GET_STR(data[id].key), GET_STR(key))) {
-      // return null if already have this key
-      return NULL;
-    }
-    if (obj.psl > data[id].psl) {
-      // do swap
-      Node temp;
-      memcpy(&temp, &obj, sizeof(Node));
-      memcpy(&obj, &data[id], sizeof(Node));
-      memcpy(&data[id], &temp, sizeof(Node));
-    }
-    obj.psl++;
-    id = (id + 1) & (ht->allocated-1);
-  }
-  // insert element
-  memcpy(&data[id], &obj, sizeof(Node));
-  // increment the size counter
-  HASH_TABLE_SET_SIZE(ht, HASH_TABLE_GET_SIZE(ht)+1);
-  return &data[id].value;
+  return &HashTableInsert(ht, key, value)->value;
 }
 
 Lips_Cell
@@ -2101,8 +2079,41 @@ HashTableSearchStr(const HashTable* ht, uint32_t hash, const char* key, uint32_t
   return NULL;
 }
 
+Node*
+HashTableInsert(HashTable* ht, Lips_Cell key, Lips_Cell value)
+{
+  // insert key and value using robin-hood hashing
+  Node* data = HASH_TABLE_DATA(ht);
+  Node obj;
+  obj.key = key;
+  obj.value = value;
+  obj.psl = 0;
+  uint32_t id = GET_STR(key)->hash & (ht->allocated-1);
+  while (NODE_VALID(data[id])) {
+    if (StringEqual(GET_STR(key), GET_STR(data[id].key))) {
+      // return null if already have this key
+      return NULL;
+    }
+    if (obj.psl > data[id].psl) {
+      // do swap
+      Node temp;
+      memcpy(&temp, &obj, sizeof(Node));
+      memcpy(&obj, &data[id], sizeof(Node));
+      memcpy(&data[id], &temp, sizeof(Node));
+    }
+    obj.psl++;
+    id = (id + 1) & (ht->allocated-1);
+  }
+  // insert element
+  memcpy(&data[id], &obj, sizeof(Node));
+  // increment size counter
+  HASH_TABLE_SET_SIZE(ht, HASH_TABLE_GET_SIZE(ht)+1);
+  return &data[id];
+}
+
 void
-HashTableIterate(HashTable* ht, Iterator* it) {
+HashTableIterate(HashTable* ht, Iterator* it)
+{
   it->node = HASH_TABLE_DATA(ht);
   it->size = HASH_TABLE_GET_SIZE(ht);
   if (it->size > 0) {
@@ -2202,31 +2213,7 @@ PListInsert(Lips_Machine* machine, HashTable* ht, Lips_Cell key, Lips_Cell value
     uint32_t sz = (HASH_TABLE_GET_SIZE(ht) == 0) ? 1 : (HASH_TABLE_GET_SIZE(ht)<<1);
     PListReserve(machine, ht, sz);
   }
-  Node* data = HASH_TABLE_DATA(ht);
-  Node obj;
-  obj.key = key;
-  obj.value = value;
-  obj.psl = 0;
-  uint32_t id = GET_STR(key)->hash & (ht->allocated-1);
-  while (NODE_VALID(data[id])) {
-    if (StringEqual(GET_STR(key), GET_STR(data[id].key))) {
-      return NULL;
-    }
-    if (obj.psl > data[id].psl) {
-      // do swap
-      Node temp;
-      memcpy(&temp, &obj, sizeof(Node));
-      memcpy(&obj, &data[id], sizeof(Node));
-      memcpy(&data[id], &obj, sizeof(Node));
-    }
-    obj.psl++;
-    id = (id+1) & (ht->allocated-1);
-  }
-  // insert element
-  memcpy(&data[id], &obj, sizeof(Node));
-  // increment the size counter
-  HASH_TABLE_SET_SIZE(ht, HASH_TABLE_GET_SIZE(ht)+1);
-  return data[id].value;
+  return HashTableInsert(ht, key, value)->value;
 }
 
 Lips_Cell
@@ -2945,6 +2932,13 @@ LIPS_DECLARE_FUNCTION(remove)
   if (ret == NULL)
     ret = machine->S_nil;
   return ret;
+}
+
+LIPS_DECLARE_FUNCTION(cons)
+{
+  (void)udata;
+  (void)numargs;
+  return Lips_NewPair(machine, args[0], args[1]);
 }
 
 LIPS_DECLARE_MACRO(lambda)
