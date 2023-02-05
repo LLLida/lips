@@ -23,12 +23,24 @@ int main(int argc, char** argv)
   TEST("(insert cars :class (plist :v 7.8 :bike 2 :red (list (quote sym) \"Hi!\") (quote booba) :plane))");
   TEST("cars");
   TEST("(get cars :class)");
+
+  GC();
+
   TEST("(get (get cars :class) :red)");
+  TEST("(get (get cars :class) :v)");
+  TEST("(get (get cars :class) :bike)");
+  TEST("(get (get cars :class) (quote booba))");
 
   GC();
 
   TEST("cars");
   TEST("(get cars :class)");
+
+  TEST("(insert (get cars :class) :primes (cons 37 39))");
+  TEST("(get (get cars :class) :primes)");
+  // if we rename :la to :lambda then we get a crash too!
+  TEST("(insert cars :la (lambda (name) (format \"Hello, %s!\" name)))");
+  TEST("(get (intern \"cars\") :la)");
 
   Lips_DestroyMachine(machine);
   return 0;

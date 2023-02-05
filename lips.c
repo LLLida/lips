@@ -132,7 +132,7 @@ static void IteratorNext(Iterator* it);
 static uint32_t PListSize(const HashTable* ht);
 static void PListDestroy(Lips_Machine* machine, HashTable* ht);
 static HashTable* PListReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity);
-static Lips_Cell PListInsert(Lips_Machine* machine, HashTable* ht, Lips_Cell key, Lips_Cell value);
+static Lips_Cell PListInsert(Lips_Machine* machine, HashTable** ht, Lips_Cell key, Lips_Cell value);
 static Lips_Cell PListRemove(HashTable* ht, Lips_Cell key);
 
 static Bucket* FindBucketForString(Lips_Machine* machine);
@@ -171,6 +171,8 @@ static LIPS_DECLARE_FUNCTION(get);
 static LIPS_DECLARE_FUNCTION(insert);
 static LIPS_DECLARE_FUNCTION(remove);
 static LIPS_DECLARE_FUNCTION(cons);
+static LIPS_DECLARE_FUNCTION(intern);
+static LIPS_DECLARE_FUNCTION(bound);
 
 static LIPS_DECLARE_MACRO(lambda);
 static LIPS_DECLARE_MACRO(macro);
@@ -179,8 +181,8 @@ static LIPS_DECLARE_MACRO(quote);
 static LIPS_DECLARE_MACRO(progn);
 static LIPS_DECLARE_MACRO(if);
 static LIPS_DECLARE_MACRO(when);
+static LIPS_DECLARE_MACRO(unless);
 static LIPS_DECLARE_MACRO(catch);
-static LIPS_DECLARE_MACRO(intern);
 // TODO: implement cond
 
 
@@ -465,6 +467,8 @@ Lips_CreateMachine(const Lips_MachineCreateInfo* info)
   LIPS_DEFINE_FUNCTION(machine, insert, LIPS_NUM_ARGS_3, NULL);
   LIPS_DEFINE_FUNCTION(machine, remove, LIPS_NUM_ARGS_2, NULL);
   LIPS_DEFINE_FUNCTION(machine, cons, LIPS_NUM_ARGS_2, NULL);
+  LIPS_DEFINE_FUNCTION(machine, intern, LIPS_NUM_ARGS_1, NULL);
+  LIPS_DEFINE_FUNCTION(machine, bound, LIPS_NUM_ARGS_1, NULL);
 
   LIPS_DEFINE_MACRO(machine, lambda, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(machine, macro, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
@@ -473,8 +477,8 @@ Lips_CreateMachine(const Lips_MachineCreateInfo* info)
   LIPS_DEFINE_MACRO(machine, progn, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(machine, if, LIPS_NUM_ARGS_3|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(machine, when, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
+  LIPS_DEFINE_MACRO(machine, unless, LIPS_NUM_ARGS_2|LIPS_NUM_ARGS_VAR, NULL);
   LIPS_DEFINE_MACRO(machine, catch, LIPS_NUM_ARGS_1|LIPS_NUM_ARGS_VAR, NULL);
-  LIPS_DEFINE_MACRO(machine, intern, LIPS_NUM_ARGS_1, NULL);
 
   machine->T_integer  = Lips_Define(machine, "<integer>", Lips_NewSymbol(machine, "integer"));
   machine->T_real     = Lips_Define(machine, "<real>", Lips_NewSymbol(machine, "real"));
@@ -2100,8 +2104,10 @@ HashTableInsert(HashTable* ht, Lips_Cell key, Lips_Cell value)
       memcpy(&temp, &obj, sizeof(Node));
       memcpy(&obj, &data[id], sizeof(Node));
       memcpy(&data[id], &temp, sizeof(Node));
+      obj.psl = data[id].psl+1;
+    } else {
+      obj.psl++;
     }
-    obj.psl++;
     id = (id + 1) & (ht->allocated-1);
   }
   // insert element
@@ -2191,7 +2197,7 @@ PListReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity)
     if (old_size > 0) {
       for (uint32_t i = 0; HASH_TABLE_GET_SIZE(ht) < old_size; i++) {
         if (NODE_VALID(prev[i])) {
-          PListInsert(machine, ht, prev[i].key, prev[i].value);
+          assert(HashTableInsert(ht, prev[i].key, prev[i].value));
         }
       }
     }
@@ -2201,7 +2207,7 @@ PListReserve(Lips_Machine* machine, HashTable* ht, uint32_t capacity)
 }
 
 Lips_Cell
-PListInsert(Lips_Machine* machine, HashTable* ht, Lips_Cell key, Lips_Cell value)
+PListInsert(Lips_Machine* machine, HashTable** ht, Lips_Cell key, Lips_Cell value)
 {
   // TODO: assert non-string types
   TYPE_CHECK_FORCED(LIPS_TYPE_STRING|LIPS_TYPE_SYMBOL, key);
@@ -2209,11 +2215,11 @@ PListInsert(Lips_Machine* machine, HashTable* ht, Lips_Cell key, Lips_Cell value
   if (ht == NULL) {
     return NULL;
   }
-  if (HASH_TABLE_GET_SIZE(ht) == ht->allocated) {
-    uint32_t sz = (HASH_TABLE_GET_SIZE(ht) == 0) ? 1 : (HASH_TABLE_GET_SIZE(ht)<<1);
-    PListReserve(machine, ht, sz);
+  if (HASH_TABLE_GET_SIZE(*ht) == (*ht)->allocated) {
+    uint32_t sz = (HASH_TABLE_GET_SIZE(*ht) == 0) ? 1 : (HASH_TABLE_GET_SIZE(*ht)<<1);
+    *ht = PListReserve(machine, *ht, sz);
   }
-  return HashTableInsert(ht, key, value)->value;
+  return HashTableInsert(*ht, key, value)->value;
 }
 
 Lips_Cell
@@ -2886,7 +2892,7 @@ LIPS_DECLARE_FUNCTION(plist)
     GET_PLIST(ret) = PListReserve(machine, GET_PLIST(ret), numargs >> 1);
     for (uint32_t i = 0; i < numargs; i += 2) {
       Lips_Cell key = args[i], value = args[i+1];
-      PListInsert(machine, GET_PLIST(ret), key, value);
+      PListInsert(machine, &GET_PLIST(ret), key, value);
     }
   }
   return ret;
@@ -2916,7 +2922,7 @@ LIPS_DECLARE_FUNCTION(insert)
   if (GET_TYPE(plist) != LIPS_TYPE_PLIST) {
     LIPS_THROW_ERROR(machine, "insert: first argument should be an plist");
   }
-  Lips_Cell ret = PListInsert(machine, GET_PLIST(plist), key, value);
+  Lips_Cell ret = PListInsert(machine, &GET_PLIST(plist), key, value);
   return ret;
 }
 
@@ -2938,7 +2944,27 @@ LIPS_DECLARE_FUNCTION(cons)
 {
   (void)udata;
   (void)numargs;
-  return Lips_NewPair(machine, args[0], args[1]);
+  return Lips_NewList(machine, 2, args);
+}
+
+LIPS_DECLARE_FUNCTION(intern)
+{
+  (void)udata;
+  (void)numargs;
+  TYPE_CHECK(machine, LIPS_TYPE_STRING|LIPS_TYPE_SYMBOL, args[0]);
+  Lips_Cell cell = Lips_InternCell(machine, args[0]);
+  return cell;
+}
+
+LIPS_DECLARE_FUNCTION(bound)
+{
+  (void)udata;
+  (void)numargs;
+  TYPE_CHECK(machine, LIPS_TYPE_STRING|LIPS_TYPE_SYMBOL, args[0]);
+  Lips_Cell cell = Lips_InternCell(machine, args[0]);
+  if (cell != machine->S_nil)
+    cell = machine->S_t;
+  return cell;
 }
 
 LIPS_DECLARE_MACRO(lambda)
@@ -3023,20 +3049,22 @@ LIPS_DECLARE_MACRO(when)
   return machine->S_nil;
 }
 
+LIPS_DECLARE_MACRO(unless)
+{
+  (void)udata;
+  Lips_Cell condition = Lips_Eval(machine, GET_HEAD(args));
+  if (F_nilp(machine, 1, &condition, NULL) != machine->S_nil) {
+    return M_progn(machine, GET_TAIL(args), NULL);
+  }
+  return machine->S_nil;
+}
+
 LIPS_DECLARE_MACRO(catch)
 {
   (void)udata;
   Lips_Cell ret = M_progn(machine, args, udata);
   PushCatch(machine);
   return ret;
-}
-
-LIPS_DECLARE_MACRO(intern)
-{
-  (void)udata;
-  TYPE_CHECK(machine, LIPS_TYPE_STRING|LIPS_TYPE_SYMBOL, GET_HEAD(args));
-  Lips_Cell cell = Lips_InternCell(machine, GET_HEAD(args));
-  return cell;
 }
 
 // Local Variables:
