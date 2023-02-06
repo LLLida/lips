@@ -801,21 +801,7 @@ Lips_NewKeywordN(Lips_Machine* machine, const char* str, uint32_t n)
 {
   Lips_Cell cell = NewCell(machine);
   cell->type = LIPS_TYPE_KEYWORD;
-  StringData* data = NULL;
-  // try to find string in environments so we don't waste space
-  HashTable* env = MachineEnv(machine);
-  uint32_t hash = ComputeHashN(str, n);
-  do {
-    Node* node = HashTableSearchStr(env, hash, str, n);
-    if (node) {
-      data = GET_STR(node->key);
-      goto skip;
-    }
-    env = EnvParent(machine, env);
-  } while (env);
-  data = StringCreateWithHash(machine, str, n, hash);
- skip:
-  GET_STR(cell) = data;
+  GET_STR(cell) = StringCreate(machine, str, n);
   return cell;
 }
 

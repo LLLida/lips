@@ -38,9 +38,8 @@ int main(int argc, char** argv)
 
   TEST("(insert (get cars :class) :primes (cons 37 39))");
   TEST("(get (get cars :class) :primes)");
-  // if we rename :la to :lambda then we get a crash too!
-  TEST("(insert cars :la (lambda (name) (format \"Hello, %s!\" name)))");
-  TEST("(get (intern \"cars\") :la)");
+  TEST("(insert cars :lambda (lambda (name) (format \"Hello, %s!\" name)))");
+  TEST("(get (intern \"cars\") :lambda)");
 
   Lips_DestroyMachine(machine);
   return 0;
